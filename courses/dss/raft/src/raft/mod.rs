@@ -1,7 +1,12 @@
-use std::sync::mpsc::{sync_channel, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use futures::channel::mpsc::UnboundedSender;
+use futures::StreamExt;
+use futures::channel::mpsc::{UnboundedSender, channel, Receiver};
+use futures::executor::ThreadPool;
+use futures::future::join_all;
+
+use futures_timer::Delay;
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 pub mod config;
@@ -30,11 +35,18 @@ pub enum ApplyMsg {
     },
 }
 
+pub struct Log {
+    pub command: Vec<u8>,
+    pub term: u64,
+}
+
 /// State of a raft peer.
 #[derive(Default, Clone, Debug)]
 pub struct State {
     pub term: u64,
     pub is_leader: bool,
+
+    pub last_heartbeat: Option<Instant>,
 }
 
 impl State {
@@ -53,13 +65,19 @@ pub struct Raft {
     // RPC end points of all peers
     peers: Vec<RaftClient>,
     // Object to hold this peer's persisted state
-    persister: Box<dyn Persister>,
+    persister: Mutex<Box<dyn Persister>>,
     // this peer's index into peers[]
     me: usize,
-    state: Arc<State>,
+    state: Arc<Mutex<State>>,
     // Your data here (2A, 2B, 2C).
     // Look at the paper's Figure 2 for a description of what
     // state a Raft server must maintain.
+    voted_for: Option<u64>,
+    log: Vec<Log>,
+    commit_index: u64,
+    last_applied: u64,
+    next_index: Vec<u64>,
+    match_index: Vec<u64>,
 }
 
 impl Raft {
@@ -74,10 +92,10 @@ impl Raft {
     pub fn new(
         peers: Vec<RaftClient>,
         me: usize,
-        persister: Box<dyn Persister>,
-        apply_ch: UnboundedSender<ApplyMsg>,
+        persister: Mutex<Box<dyn Persister>>,
+        _apply_ch: UnboundedSender<ApplyMsg>,
     ) -> Raft {
-        let raft_state = persister.raft_state();
+        let raft_state = persister.lock().unwrap().raft_state();
 
         // Your initialization code here (2A, 2B, 2C).
         let mut rf = Raft {
@@ -85,12 +103,19 @@ impl Raft {
             persister,
             me,
             state: Arc::default(),
+            voted_for: None,
+            log: Vec::default(),
+            commit_index: 0,
+            last_applied: 0,
+            next_index: Vec::default(),
+            match_index: Vec::default(),
         };
 
         // initialize from state persisted before a crash
         rf.restore(&raft_state);
 
-        crate::your_code_here((rf, apply_ch))
+        rf
+        // crate::your_code_here((rf, apply_ch))
     }
 
     /// save Raft's persistent state to stable storage,
@@ -147,17 +172,17 @@ impl Raft {
         // Your code here if you want the rpc becomes async.
         // Example:
         // ```
-        // let peer = &self.peers[server];
-        // let peer_clone = peer.clone();
-        // let (tx, rx) = channel();
-        // peer.spawn(async move {
-        //     let res = peer_clone.request_vote(&args).await.map_err(Error::Rpc);
-        //     tx.send(res);
-        // });
-        // rx
+        let peer = &self.peers[server];
+        let peer_clone = peer.clone();
+        let (mut tx, rx) = channel(1000);
+        peer.spawn(async move {
+            let res = peer_clone.request_vote(&args).await.map_err(Error::Rpc);
+            tx.try_send(res).unwrap();
+        });
+        rx
         // ```
-        let (tx, rx) = sync_channel::<Result<RequestVoteReply>>(1);
-        crate::your_code_here((server, args, tx, rx))
+        // let (tx, rx) = sync_channel::<Result<RequestVoteReply>>(1);
+        // crate::your_code_here((server, args, tx, rx))
     }
 
     fn start<M>(&self, command: &M) -> Result<(u64, u64)>
@@ -207,6 +232,12 @@ impl Raft {
         let _ = &self.me;
         let _ = &self.persister;
         let _ = &self.peers;
+        let _ = &self.voted_for;
+        let _ = &self.log;
+        let _ = &self.commit_index;
+        let _ = &self.last_applied;
+        let _ = &self.next_index;
+        let _ = &self.match_index;
     }
 }
 
@@ -227,13 +258,74 @@ impl Raft {
 #[derive(Clone)]
 pub struct Node {
     // Your code here.
+    raft: Arc<Mutex<Raft>>,
 }
 
 impl Node {
     /// Create a new raft service.
-    pub fn new(raft: Raft) -> Node {
+    pub fn new(raft: Arc<Mutex<Raft>>) -> Node {
         // Your code here.
-        crate::your_code_here(raft)
+        let clone = raft.clone();
+
+        let pool = ThreadPool::new().unwrap();
+
+        pool.spawn_ok(async move {
+            loop {
+                Delay::new(Duration::from_millis(150)).await;
+
+                let mut state = clone.lock().unwrap().state.lock().unwrap().clone();
+
+                match state.last_heartbeat {
+                    Some(x) => {
+                        if x.elapsed() < Duration::from_millis(150) {
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+
+                let args = RequestVoteArgs {
+                    term: state.term,
+                    candidate_id: clone.me as u64,
+                    last_log_index: clone.log.len() as u64, // -1,
+                    // last_log_term: clone.log.last().unwrap().term,
+                    last_log_term: 0,
+                };
+
+                let fut_votes = clone.peers
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        clone.send_request_vote(i, args.clone())
+                    })
+                    .collect::<Vec<_>>();
+                
+                let fut_votes = fut_votes
+                    .into_iter()
+                    .map(|mut rx| async move {
+                        rx.next().await.unwrap().unwrap()
+                    })
+                    .collect::<Vec<_>>();
+
+                let votes = join_all(fut_votes).await;
+
+                let votes_count = votes.iter().fold(0, |acc, reply| {
+                    if reply.vote_granted {
+                        return acc + 1;
+                    }
+
+                    acc
+                });
+
+                debug!("{} votes for {}", votes_count, clone.me);
+
+                if votes_count > (clone.peers.len() + 1) / 2 {
+                    state.is_leader = true;
+                }
+            }
+        });
+
+        Node { raft }
     }
 
     /// the service using Raft (e.g. a k/v server) wants to start
@@ -263,7 +355,8 @@ impl Node {
         // Your code here.
         // Example:
         // self.raft.term
-        crate::your_code_here(())
+        self.raft.to_owned().state.to_owned().lock().unwrap().term
+        // crate::your_code_here(())
     }
 
     /// Whether this peer believes it is the leader.
@@ -271,7 +364,8 @@ impl Node {
         // Your code here.
         // Example:
         // self.raft.leader_id == self.id
-        crate::your_code_here(())
+        self.raft.to_owned().state.to_owned().lock().unwrap().is_leader
+        // crate::your_code_here(())
     }
 
     /// The current state of this peer.
@@ -279,6 +373,7 @@ impl Node {
         State {
             term: self.term(),
             is_leader: self.is_leader(),
+            last_heartbeat: None,
         }
     }
 
@@ -329,6 +424,34 @@ impl RaftService for Node {
     // CAVEATS: Please avoid locking or sleeping here, it may jam the network.
     async fn request_vote(&self, args: RequestVoteArgs) -> labrpc::Result<RequestVoteReply> {
         // Your code here (2A, 2B).
+        if args.term < self.term() {
+            return Ok(RequestVoteReply {
+                term: self.term(),
+                vote_granted: false,
+            });
+        }
+
+        if self.raft.voted_for.is_none() || self.raft.voted_for == Some(args.candidate_id) {
+            if args.last_log_index >= self.raft.log.len() as u64 {
+                return Ok(RequestVoteReply {
+                    term: self.term(),
+                    vote_granted: true,
+                });
+            }
+        }
+
+        Ok(RequestVoteReply {
+            term: self.term(),
+            vote_granted: false,
+        })
+    }
+    async fn append_entries(&self, args: AppendEntriesArgs) -> labrpc::Result<AppendEntriesReply> {
+        let now = Instant::now();
+        let mut state = self.raft.state.lock().unwrap().clone();
+
+        if self.raft.voted_for == Some(args.leader_id) && Some(now) > state.last_heartbeat {
+            state.last_heartbeat = Some(now)
+        }
         crate::your_code_here(args)
     }
 }

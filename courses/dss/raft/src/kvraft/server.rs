@@ -3,6 +3,8 @@ use futures::channel::mpsc::unbounded;
 use crate::proto::kvraftpb::*;
 use crate::raft;
 
+use std::sync::Mutex;
+
 pub struct KvServer {
     pub rf: raft::Node,
     me: usize,
@@ -15,7 +17,7 @@ impl KvServer {
     pub fn new(
         servers: Vec<crate::proto::raftpb::RaftClient>,
         me: usize,
-        persister: Box<dyn raft::persister::Persister>,
+        persister: Mutex<Box<dyn raft::persister::Persister>>,
         maxraftstate: Option<usize>,
     ) -> KvServer {
         // You may need initialization code here.
