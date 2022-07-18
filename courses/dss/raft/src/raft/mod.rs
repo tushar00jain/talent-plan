@@ -1,11 +1,13 @@
+use std::cmp::max;
 use std::sync::{Arc, Mutex};
 
-use futures::StreamExt;
+use futures::{StreamExt, select};
 use futures::channel::mpsc::{UnboundedSender, channel, Receiver};
 use futures::executor::ThreadPool;
 use futures::future::join_all;
 
 use futures_timer::Delay;
+use rand::Rng;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -46,6 +48,7 @@ pub struct State {
     pub term: u64,
     pub is_leader: bool,
 
+    pub voted_for: Option<u64>,
     pub last_heartbeat: Option<Instant>,
 }
 
@@ -72,7 +75,6 @@ pub struct Raft {
     // Your data here (2A, 2B, 2C).
     // Look at the paper's Figure 2 for a description of what
     // state a Raft server must maintain.
-    voted_for: Option<u64>,
     log: Vec<Log>,
     commit_index: u64,
     last_applied: u64,
@@ -103,7 +105,6 @@ impl Raft {
             persister,
             me,
             state: Arc::default(),
-            voted_for: None,
             log: Vec::default(),
             commit_index: 0,
             last_applied: 0,
@@ -185,6 +186,21 @@ impl Raft {
         // crate::your_code_here((server, args, tx, rx))
     }
 
+    fn send_append_entries(
+        &self,
+        server: usize,
+        args: AppendEntriesArgs,
+    ) -> Receiver<Result<AppendEntriesReply>> {
+        let peer = &self.peers[server];
+        let peer_clone = peer.clone();
+        let (mut tx, rx) = channel(1000);
+        peer.spawn(async move {
+            let res = peer_clone.append_entries(&args).await.map_err(Error::Rpc);
+            tx.try_send(res).unwrap();
+        });
+        rx
+    }
+
     fn start<M>(&self, command: &M) -> Result<(u64, u64)>
     where
         M: labcodec::Message,
@@ -232,7 +248,6 @@ impl Raft {
         let _ = &self.me;
         let _ = &self.persister;
         let _ = &self.peers;
-        let _ = &self.voted_for;
         let _ = &self.log;
         let _ = &self.commit_index;
         let _ = &self.last_applied;
@@ -273,13 +288,54 @@ impl Node {
 
         let pool = ThreadPool::new().unwrap();
 
+        let mut rng = rand::thread_rng();
+        let delay = rng.gen_range(50, 100);
+
         pool.spawn_ok(async move {
             loop {
-                Delay::new(Duration::from_millis(150)).await;
+                let t = Instant::now();
+                Delay::new(Duration::from_millis(200 + delay)).await;
 
                 let is_leader = { clone.lock().unwrap().state.lock().unwrap().is_leader() };
 
+                let term = { clone.lock().unwrap().state.lock().unwrap().term() };
+
                 if is_leader {
+                    let args = AppendEntriesArgs{
+                        term,
+                        leader_id: candidate_id,
+                        prev_log_index: 0,
+                        prev_log_term: 0,
+                        entries: Default::default(),
+                        leader_commit: 0,
+                    };
+
+                    let fut_replies = (0..peers)
+                        .into_iter()
+                        .filter(|&i| i != candidate_id as usize)
+                        .map(|i| {
+                            debug!("send_append_entries {} -> {}", candidate_id, i);
+                            clone.lock().unwrap().send_append_entries(i, args.clone())
+                        })
+                        .map(|mut rx| async move {
+                            select! {
+                                response = rx.next() => response.unwrap().unwrap(),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    let replies = join_all(fut_replies).await;
+
+                    let max_term = replies.iter().fold(term, |acc, reply| max(acc, reply.term));
+
+                    if max_term > term {
+                        let guard = clone.lock().unwrap();
+                        let mut state = guard.state.lock().unwrap();
+                        state.term = max_term;
+                        state.voted_for = None;
+                        state.is_leader = false;
+                    }
+
                     continue;
                 }
 
@@ -287,35 +343,39 @@ impl Node {
 
                 match last_heartbeat {
                     Some(i) => {
-                        if i.elapsed() < Duration::from_millis(150) {
+                        if i > t {
                             continue;
                         }
                     }
                     _ => {}
                 }
 
-                let term = { clone.lock().unwrap().state.lock().unwrap().term() };
-
-                let last_log_index = { clone.lock().unwrap().log.len() } as u64;
-
-                let last_log_term = { clone.lock().unwrap().log.last().map(|log| log.term).unwrap_or_default() };
+                let term = {
+                    let guard = clone.lock().unwrap();
+                    let mut state = guard.state.lock().unwrap();
+                    state.voted_for = Some(candidate_id);
+                    state.term += 1;
+                    state.term
+                };
 
                 let args = RequestVoteArgs {
                     term,
                     candidate_id,
-                    last_log_index,
-                    last_log_term,
+                    last_log_index: 0,
+                    last_log_term: 0,
                 };
 
                 let fut_votes = (0..peers)
                     .into_iter()
-                    // .filter(|&i| i != candidate_id as usize)
+                    .filter(|&i| i != candidate_id as usize)
                     .map(|i| {
-                        debug!("{} requesting vote from {}", candidate_id, i);
+                        debug!("send_request_vote {} -> {}", candidate_id, i);
                         clone.lock().unwrap().send_request_vote(i, args.clone())
                     })
                     .map(|mut rx| async move {
-                        rx.next().await.unwrap().unwrap()
+                        select! {
+                            response = rx.next() => response.unwrap().unwrap(),
+                        }
                     })
                     .collect::<Vec<_>>();
 
@@ -333,14 +393,14 @@ impl Node {
                     acc
                 });
 
-                debug!("{} votes for {}", votes_count, candidate_id);
-
                 let guard = clone.lock().unwrap();
                 let mut state = guard.state.lock().unwrap();
 
                 if votes_count >= peers / 2 + 1 {
                     state.is_leader = true;
                 }
+
+                debug!("votes_count {} : {}", candidate_id, votes_count);
             }
         });
 
@@ -393,6 +453,7 @@ impl Node {
             term: self.term(),
             is_leader: self.is_leader(),
             last_heartbeat: self.raft.lock().unwrap().state.lock().unwrap().last_heartbeat,
+            voted_for: self.raft.lock().unwrap().state.lock().unwrap().voted_for,
         }
     }
 
@@ -444,32 +505,36 @@ impl RaftService for Node {
     async fn request_vote(&self, args: RequestVoteArgs) -> labrpc::Result<RequestVoteReply> {
         // Your code here (2A, 2B).
         let clone = self.raft.clone();
+        let raft = clone.lock().unwrap();
+        let mut state = raft.state.lock().unwrap();
 
-        let term = self.term();
-        if args.term < term {
+        if args.term < state.term {
             return Ok(RequestVoteReply {
-                term,
+                term: state.term,
                 vote_granted: false,
             });
         }
+
+        if args.term > state.term {
+            state.term = args.term;
+            state.is_leader = false;
+            state.voted_for = None;
+        }
         
-        let len = { clone.lock().unwrap().log.len() as u64 };
-        let voted_for = { clone.lock().unwrap().voted_for };
+        if state.voted_for.is_none() || state.voted_for == Some(args.candidate_id) {
+            state.voted_for = Some(args.candidate_id);
 
-        let a = voted_for.is_none() || voted_for == Some(args.candidate_id);
-        let b = args.last_log_index >= len;
+            // TODO
+            state.last_heartbeat = Some(Instant::now());
 
-        if a && b {
-            let mut raft = clone.lock().unwrap();
-            raft.voted_for = Some(args.candidate_id);
             return Ok(RequestVoteReply {
-                term,
+                term: args.term,
                 vote_granted: true,
             });
         }
 
         Ok(RequestVoteReply {
-            term,
+            term: args.term,
             vote_granted: false,
         })
     }
@@ -477,27 +542,21 @@ impl RaftService for Node {
     async fn append_entries(&self, args: AppendEntriesArgs) -> labrpc::Result<AppendEntriesReply> {
         let clone = self.raft.clone();
         let guard = clone.lock().unwrap();
-        let mut state = guard.state.lock().unwrap().clone();
+        let mut state = guard.state.lock().unwrap();
 
-        let term = state.term;
-
-        if args.term < term {
+        if args.term < state.term {
             return Ok(AppendEntriesReply {
-                term,
+                term: state.term,
                 success: false,
             })
         }
 
-        if args.term > term {
+        if args.term > state.term {
             state.term = args.term;
             state.is_leader = false;
         }
 
-        let now = Instant::now();
-
-        if guard.voted_for == Some(args.leader_id) && Some(now) > state.last_heartbeat {
-            state.last_heartbeat = Some(now)
-        }
+        state.last_heartbeat = Some(Instant::now());
 
         Ok(AppendEntriesReply {
             term: args.term,
