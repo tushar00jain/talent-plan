@@ -1,11 +1,11 @@
 use std::cmp::max;
 use std::sync::{Arc, Mutex};
 
-use futures::{StreamExt};
 use futures::channel::mpsc::{UnboundedSender, channel, Receiver};
 use futures::executor::ThreadPool;
 use futures::future::join_all;
 
+use futures::{select, FutureExt};
 use futures_timer::Delay;
 use rand::Rng;
 use std::time::{Duration, Instant};
@@ -243,6 +243,7 @@ impl Raft {
         let _ = self.cond_install_snapshot(0, 0, &[]);
         let _ = self.snapshot(0, &[]);
         let _ = self.send_request_vote(0, Default::default());
+        let _ = self.send_append_entries(0, Default::default());
         self.persist();
         let _ = &self.state;
         let _ = &self.me;
@@ -281,7 +282,7 @@ impl Node {
     pub fn new(rf: Raft) -> Node {
         // Your code here.
         let candidate_id = rf.me as u64;
-        let peers = rf.peers.len();
+        let peers = rf.peers.clone();
 
         let raft = Arc::new(Mutex::new(rf));
         let clone = raft.clone();
@@ -293,12 +294,10 @@ impl Node {
 
         pool.spawn_ok(async move {
             loop {
-                let t = Instant::now();
-                Delay::new(Duration::from_millis(200 + delay)).await;
-
                 let is_leader = { clone.lock().unwrap().state.lock().unwrap().is_leader() };
 
                 if is_leader {
+                    Delay::new(Duration::from_millis(20)).await;
                     let term = { clone.lock().unwrap().state.lock().unwrap().term() };
 
                     let args = AppendEntriesArgs{
@@ -310,15 +309,18 @@ impl Node {
                         leader_commit: 0,
                     };
 
-                    let fut_replies = (0..peers)
+                    let fut_replies = (0..peers.len())
                         .into_iter()
                         .filter(|&i| i != candidate_id as usize)
                         .map(|i| {
                             debug!("send_append_entries {} -> {}", candidate_id, i);
-                            clone.lock().unwrap().send_append_entries(i, args.clone())
+                            peers[i].append_entries(&args)
                         })
-                        .map(|mut rx| async move {
-                            rx.next().await.unwrap().unwrap()
+                        .map(|fut| async move {
+                            select! {
+                                r = fut.fuse() => r.unwrap(),
+                                _ = Delay::new(Duration::from_millis(50)).fuse() => Default::default(),
+                            }
                         })
                         .collect::<Vec<_>>();
 
@@ -338,66 +340,89 @@ impl Node {
                     continue;
                 }
 
-                let last_heartbeat = { clone.lock().unwrap().state.lock().unwrap().last_heartbeat };
+                let t = Instant::now();
+                Delay::new(Duration::from_millis(200 + delay)).await;
 
-                match last_heartbeat {
-                    Some(i) => {
-                        if i > t {
-                            continue;
-                        }
-                    }
-                    _ => {}
-                }
-
-                let term = {
+                let done = {
                     let guard = clone.lock().unwrap();
-                    let mut state = guard.state.lock().unwrap();
-                    state.voted_for = Some(candidate_id);
-                    state.term += 1;
-                    state.term
+                    let state = guard.state.lock().unwrap();
+
+                    match state.last_heartbeat {
+                        Some(i) => {
+                            debug!("last_heartbeat {} : {} {}, {}", candidate_id, i.elapsed().as_millis(), t.elapsed().as_millis(), i > t);
+                            if i > t {
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false
+                    }
                 };
 
-                let args = RequestVoteArgs {
-                    term,
-                    candidate_id,
-                    last_log_index: 0,
-                    last_log_term: 0,
-                };
-
-                let fut_votes = (0..peers)
-                    .into_iter()
-                    .filter(|&i| i != candidate_id as usize)
-                    .map(|i| {
-                        debug!("send_request_vote {} -> {}", candidate_id, i);
-                        clone.lock().unwrap().send_request_vote(i, args.clone())
-                    })
-                    .map(|mut rx| async move {
-                        rx.next().await.unwrap().unwrap()
-                    })
-                    .collect::<Vec<_>>();
-
-                let votes = join_all(fut_votes).await;
-
-                if votes.iter().any(|reply| reply.term > term) {
+                if done {
                     continue;
                 }
 
-                let votes_count = votes.iter().fold(1, |acc, reply| {
-                    if reply.vote_granted {
-                        return acc + 1;
+                loop {
+                    let term = {
+                        let guard = clone.lock().unwrap();
+                        let mut state = guard.state.lock().unwrap();
+                        state.voted_for = Some(candidate_id);
+                        state.term += 1;
+                        state.term
+                    };
+
+                    let args = RequestVoteArgs {
+                        term,
+                        candidate_id,
+                        last_log_index: 0,
+                        last_log_term: 0,
+                    };
+
+                    let fut_votes = (0..peers.len())
+                        .into_iter()
+                        .filter(|&i| i != candidate_id as usize)
+                        .map(|i| {
+                            debug!("send_request_vote {} -> {}", candidate_id, i);
+                            peers[i].request_vote(&args)
+                        })
+                        .map(|fut| async move {
+                            select! {
+                                r = fut.fuse() => r.unwrap(),
+                                _ = Delay::new(Duration::from_millis(50)).fuse() => Default::default(),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    let votes = join_all(fut_votes).await;
+
+                    let guard = clone.lock().unwrap();
+                    let mut state = guard.state.lock().unwrap();
+
+                    let max_term = votes.iter().fold(state.term, |acc, reply| max(acc, reply.term));
+
+                    if max_term > state.term {
+                        state.term = max_term;
+                        state.is_leader = false;
+                        state.voted_for = None;
+                        break;
                     }
 
-                    acc
-                });
+                    let votes_count = votes.iter().fold(1, |acc, reply| {
+                        if reply.vote_granted {
+                            return acc + 1;
+                        }
 
-                let guard = clone.lock().unwrap();
-                let mut state = guard.state.lock().unwrap();
+                        acc
+                    });
 
-                if votes_count >= peers / 2 + 1 {
-                    state.is_leader = true;
+                    if votes_count >= peers.len() / 2 + 1 {
+                        state.is_leader = true;
+                        debug!("votes_count {} : {}", candidate_id, votes_count);
+                        break;
+                    }
                 }
-
-                debug!("votes_count {} : {}", candidate_id, votes_count);
             }
         });
 
@@ -501,8 +526,7 @@ impl RaftService for Node {
     // CAVEATS: Please avoid locking or sleeping here, it may jam the network.
     async fn request_vote(&self, args: RequestVoteArgs) -> labrpc::Result<RequestVoteReply> {
         // Your code here (2A, 2B).
-        let clone = self.raft.clone();
-        let raft = clone.lock().unwrap();
+        let raft = self.raft.lock().unwrap();
         let mut state = raft.state.lock().unwrap();
 
         if args.term < state.term {
@@ -521,8 +545,15 @@ impl RaftService for Node {
         if state.voted_for.is_none() || state.voted_for == Some(args.candidate_id) {
             state.voted_for = Some(args.candidate_id);
 
-            // TODO
-            state.last_heartbeat = Some(Instant::now());
+            let t = Instant::now();
+
+            if let Some(i) = state.last_heartbeat {
+                if i < t {
+                    state.last_heartbeat = Some(t)
+                }
+            } else {
+                state.last_heartbeat = Some(t)
+            }
 
             return Ok(RequestVoteReply {
                 term: args.term,
@@ -537,8 +568,7 @@ impl RaftService for Node {
     }
 
     async fn append_entries(&self, args: AppendEntriesArgs) -> labrpc::Result<AppendEntriesReply> {
-        let clone = self.raft.clone();
-        let guard = clone.lock().unwrap();
+        let guard = self.raft.lock().unwrap();
         let mut state = guard.state.lock().unwrap();
 
         if args.term < state.term {
@@ -551,9 +581,18 @@ impl RaftService for Node {
         if args.term > state.term {
             state.term = args.term;
             state.is_leader = false;
+            state.voted_for = None;
         }
 
-        state.last_heartbeat = Some(Instant::now());
+        let t = Instant::now();
+
+        if let Some(i) = state.last_heartbeat {
+            if i < t {
+                state.last_heartbeat = Some(t)
+            }
+        } else {
+            state.last_heartbeat = Some(t)
+        }
 
         Ok(AppendEntriesReply {
             term: args.term,
