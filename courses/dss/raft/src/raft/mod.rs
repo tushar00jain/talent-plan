@@ -1,7 +1,7 @@
 use std::cmp::max;
 use std::sync::{Arc, Mutex};
 
-use futures::{StreamExt, select};
+use futures::{StreamExt};
 use futures::channel::mpsc::{UnboundedSender, channel, Receiver};
 use futures::executor::ThreadPool;
 use futures::future::join_all;
@@ -298,9 +298,9 @@ impl Node {
 
                 let is_leader = { clone.lock().unwrap().state.lock().unwrap().is_leader() };
 
-                let term = { clone.lock().unwrap().state.lock().unwrap().term() };
-
                 if is_leader {
+                    let term = { clone.lock().unwrap().state.lock().unwrap().term() };
+
                     let args = AppendEntriesArgs{
                         term,
                         leader_id: candidate_id,
@@ -318,19 +318,18 @@ impl Node {
                             clone.lock().unwrap().send_append_entries(i, args.clone())
                         })
                         .map(|mut rx| async move {
-                            select! {
-                                response = rx.next() => response.unwrap().unwrap(),
-                            }
+                            rx.next().await.unwrap().unwrap()
                         })
                         .collect::<Vec<_>>();
 
                     let replies = join_all(fut_replies).await;
 
-                    let max_term = replies.iter().fold(term, |acc, reply| max(acc, reply.term));
+                    let guard = clone.lock().unwrap();
+                    let mut state = guard.state.lock().unwrap();
 
-                    if max_term > term {
-                        let guard = clone.lock().unwrap();
-                        let mut state = guard.state.lock().unwrap();
+                    let max_term = replies.iter().fold(state.term, |acc, reply| max(acc, reply.term));
+
+                    if max_term > state.term {
                         state.term = max_term;
                         state.voted_for = None;
                         state.is_leader = false;
@@ -373,9 +372,7 @@ impl Node {
                         clone.lock().unwrap().send_request_vote(i, args.clone())
                     })
                     .map(|mut rx| async move {
-                        select! {
-                            response = rx.next() => response.unwrap().unwrap(),
-                        }
+                        rx.next().await.unwrap().unwrap()
                     })
                     .collect::<Vec<_>>();
 
