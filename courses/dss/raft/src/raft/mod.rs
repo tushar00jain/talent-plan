@@ -401,7 +401,6 @@ impl Node {
 
                                 let (tx, rx) = channel();
 
-                                debug!("request_vote {} -> {} ({})", candidate_id, i, args.term);
                                 peers[i].spawn(async move {
                                     let res = peer_clone.request_vote(&args_clone).await.map_err(Error::Rpc);
                                     let _ = tx.send(res);
@@ -431,12 +430,13 @@ impl Node {
                             break;
                         }
 
+                        // state got corrupted while requesting vote
+                        // i.e. someone else requested vote
                         if state.term > term {
                             break;
                         }
 
                         let votes_count = votes.iter().fold(1, |acc, reply| {
-                            debug!("request_vote REPLY {} : {}", candidate_id, reply.vote_granted);
                             if reply.vote_granted {
                                 return acc + 1;
                             }
@@ -445,7 +445,6 @@ impl Node {
                         });
 
                         if votes_count >= peers.len() / 2 + 1 {
-                            debug!("{} votes_count {} / {}", candidate_id, votes_count, peers.len());
                             state.is_leader = true;
                             break;
                         }
@@ -555,8 +554,6 @@ impl RaftService for Node {
         // Your code here (2A, 2B).
         let raft = self.raft.lock().unwrap();
         let mut state = raft.state.lock().unwrap();
-
-        debug!("request_vote {} <- {} ({})", raft.me, args.candidate_id, args.term);
 
         if args.term < state.term {
             return Ok(RequestVoteReply {
