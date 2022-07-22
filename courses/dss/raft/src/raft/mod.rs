@@ -305,10 +305,7 @@ impl Node {
                                 let args = AppendEntriesArgs{
                                     term,
                                     leader_id: candidate_id,
-                                    prev_log_index: 0,
-                                    prev_log_term: 0,
-                                    entries: Default::default(),
-                                    leader_commit: 0,
+                                    ..Default::default()
                                 };
 
                                 clone.lock().unwrap().send_append_entries(i, args)
@@ -375,8 +372,7 @@ impl Node {
                                 let args = RequestVoteArgs {
                                     term,
                                     candidate_id,
-                                    last_log_index: 0,
-                                    last_log_term: 0,
+                                    ..Default::default()
                                 };
 
                                 clone.lock().unwrap().send_request_vote(i, args)
@@ -544,8 +540,7 @@ impl RaftService for Node {
         if guard.voted_for.is_none() || guard.voted_for == Some(args.candidate_id) {
             guard.voted_for = Some(args.candidate_id);
 
-            let t = Instant::now();
-            guard.last_heartbeat = Some(t);
+            guard.last_heartbeat = Some(Instant::now());
 
             return Ok(RequestVoteReply {
                 term: args.term,
@@ -576,8 +571,7 @@ impl RaftService for Node {
             guard.voted_for = None;
         }
 
-        let t = Instant::now();
-        guard.last_heartbeat = Some(t);
+        guard.last_heartbeat = Some(Instant::now());
 
         Ok(AppendEntriesReply {
             term: args.term,
