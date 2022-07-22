@@ -23,7 +23,7 @@ use self::errors::*;
 use self::persister::*;
 use crate::proto::raftpb::*;
 
-const RPC_TIMEOUT: u64 = 50000000;
+const RPC_TIMEOUT: u64 = 50;
 
 /// As each Raft peer becomes aware that successive log entries are committed,
 /// the peer should send an `ApplyMsg` to the service (or tester) on the same
