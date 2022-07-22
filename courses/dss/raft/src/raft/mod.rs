@@ -410,14 +410,8 @@ impl Node {
                             })
                             .map(|rx| async move {
                                 select! {
-                                    r = rx.fuse() => r.unwrap().unwrap_or(RequestVoteReply{
-                                        vote_granted: false,
-                                        ..Default::default()
-                                    }),
-                                    _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => RequestVoteReply{
-                                        vote_granted: false,
-                                        ..Default::default()
-                                    },
+                                    r = rx.fuse() => r.unwrap().unwrap_or_default(),
+                                    _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default()
                                 }
                             })
                             .collect::<Vec<_>>();
