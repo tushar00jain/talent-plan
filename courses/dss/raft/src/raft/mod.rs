@@ -1,8 +1,10 @@
 use std::cmp::max;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
-use futures::channel::mpsc::{UnboundedSender, channel, Receiver};
-use futures::executor::ThreadPool;
+use futures::channel::mpsc::UnboundedSender;
+use futures::channel::oneshot::{Receiver, channel};
+use futures::executor::block_on;
 use futures::future::join_all;
 
 use futures::{select, FutureExt};
@@ -20,6 +22,8 @@ mod tests;
 use self::errors::*;
 use self::persister::*;
 use crate::proto::raftpb::*;
+
+const RPC_TIMEOUT: u64 = 50000000;
 
 /// As each Raft peer becomes aware that successive log entries are committed,
 /// the peer should send an `ApplyMsg` to the service (or tester) on the same
@@ -175,10 +179,10 @@ impl Raft {
         // ```
         let peer = &self.peers[server];
         let peer_clone = peer.clone();
-        let (mut tx, rx) = channel(1000);
+        let (tx, rx) = channel();
         peer.spawn(async move {
             let res = peer_clone.request_vote(&args).await.map_err(Error::Rpc);
-            tx.try_send(res).unwrap();
+            tx.send(res).unwrap();
         });
         rx
         // ```
@@ -193,10 +197,10 @@ impl Raft {
     ) -> Receiver<Result<AppendEntriesReply>> {
         let peer = &self.peers[server];
         let peer_clone = peer.clone();
-        let (mut tx, rx) = channel(1000);
+        let (tx, rx) = channel();
         peer.spawn(async move {
             let res = peer_clone.append_entries(&args).await.map_err(Error::Rpc);
-            tx.try_send(res).unwrap();
+            tx.send(res).unwrap();
         });
         rx
     }
@@ -287,143 +291,168 @@ impl Node {
         let raft = Arc::new(Mutex::new(rf));
         let clone = raft.clone();
 
-        let pool = ThreadPool::new().unwrap();
-
         let mut rng = rand::thread_rng();
         let delay = rng.gen_range(50, 100);
 
-        pool.spawn_ok(async move {
-            loop {
-                let is_leader = { clone.lock().unwrap().state.lock().unwrap().is_leader() };
-
-                if is_leader {
-                    Delay::new(Duration::from_millis(20)).await;
-                    let term = { clone.lock().unwrap().state.lock().unwrap().term() };
-
-                    let args = AppendEntriesArgs{
-                        term,
-                        leader_id: candidate_id,
-                        prev_log_index: 0,
-                        prev_log_term: 0,
-                        entries: Default::default(),
-                        leader_commit: 0,
-                    };
-
-                    let fut_replies = (0..peers.len())
-                        .into_iter()
-                        .filter(|&i| i != candidate_id as usize)
-                        .map(|i| {
-                            debug!("send_append_entries {} -> {}", candidate_id, i);
-                            peers[i].append_entries(&args)
-                        })
-                        .map(|fut| async move {
-                            select! {
-                                r = fut.fuse() => r.unwrap(),
-                                _ = Delay::new(Duration::from_millis(50)).fuse() => Default::default(),
-                            }
-                        })
-                        .collect::<Vec<_>>();
-
-                    let replies = join_all(fut_replies).await;
-
-                    let guard = clone.lock().unwrap();
-                    let mut state = guard.state.lock().unwrap();
-
-                    let max_term = replies.iter().fold(state.term, |acc, reply| max(acc, reply.term));
-
-                    if max_term > state.term {
-                        state.term = max_term;
-                        state.voted_for = None;
-                        state.is_leader = false;
-                    }
-
-                    continue;
-                }
-
-                let t = Instant::now();
-                Delay::new(Duration::from_millis(200 + delay)).await;
-
-                let done = {
-                    let guard = clone.lock().unwrap();
-                    let state = guard.state.lock().unwrap();
-
-                    match state.last_heartbeat {
-                        Some(i) => {
-                            debug!("last_heartbeat {} : {} {}, {}", candidate_id, i.elapsed().as_millis(), t.elapsed().as_millis(), i > t);
-                            if i > t {
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        _ => false
-                    }
-                };
-
-                if done {
-                    continue;
-                }
-
+        thread::spawn(move || {
+            block_on(async {
                 loop {
-                    let term = {
+                    let is_leader = { clone.lock().unwrap().state.lock().unwrap().is_leader() };
+
+                    if is_leader {
+                        Delay::new(Duration::from_millis(20)).await;
+                        let term = { clone.lock().unwrap().state.lock().unwrap().term() };
+
+                        let args = AppendEntriesArgs{
+                            term,
+                            leader_id: candidate_id,
+                            prev_log_index: 0,
+                            prev_log_term: 0,
+                            entries: Default::default(),
+                            leader_commit: 0,
+                        };
+
+                        let fut_replies = (0..peers.len())
+                            .into_iter()
+                            .filter(|&i| i != candidate_id as usize)
+                            .map(|i| {
+                                debug!("send_append_entries {} -> {}", candidate_id, i);
+
+                                let peer_clone = peers[i].clone();
+                                let args_clone = args.clone();
+
+                                let (tx, rx) = channel();
+
+                                peers[i].spawn(async move {
+                                    let res = peer_clone.append_entries(&args_clone).await.map_err(Error::Rpc);
+                                    tx.send(res).unwrap();
+                                });
+
+                                rx
+                            })
+                            .map(|rx| async move {
+                                select! {
+                                    r = rx.fuse() => r.unwrap().unwrap(),
+                                    _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default(),
+                                }
+                            })
+                            .collect::<Vec<_>>();
+
+                        let replies = join_all(fut_replies).await;
+
                         let guard = clone.lock().unwrap();
                         let mut state = guard.state.lock().unwrap();
-                        state.voted_for = Some(candidate_id);
-                        state.term += 1;
-                        state.term
-                    };
 
-                    let args = RequestVoteArgs {
-                        term,
-                        candidate_id,
-                        last_log_index: 0,
-                        last_log_term: 0,
-                    };
+                        let max_term = replies.iter().fold(state.term, |acc, reply| max(acc, reply.term));
 
-                    let fut_votes = (0..peers.len())
-                        .into_iter()
-                        .filter(|&i| i != candidate_id as usize)
-                        .map(|i| {
-                            debug!("send_request_vote {} -> {}", candidate_id, i);
-                            peers[i].request_vote(&args)
-                        })
-                        .map(|fut| async move {
-                            select! {
-                                r = fut.fuse() => r.unwrap(),
-                                _ = Delay::new(Duration::from_millis(50)).fuse() => Default::default(),
-                            }
-                        })
-                        .collect::<Vec<_>>();
-
-                    let votes = join_all(fut_votes).await;
-
-                    let guard = clone.lock().unwrap();
-                    let mut state = guard.state.lock().unwrap();
-
-                    let max_term = votes.iter().fold(state.term, |acc, reply| max(acc, reply.term));
-
-                    if max_term > state.term {
-                        state.term = max_term;
-                        state.is_leader = false;
-                        state.voted_for = None;
-                        break;
-                    }
-
-                    let votes_count = votes.iter().fold(1, |acc, reply| {
-                        if reply.vote_granted {
-                            return acc + 1;
+                        if max_term > state.term {
+                            state.term = max_term;
+                            state.voted_for = None;
+                            state.is_leader = false;
                         }
 
-                        acc
-                    });
+                        continue;
+                    }
 
-                    if votes_count >= peers.len() / 2 + 1 {
-                        state.is_leader = true;
-                        debug!("votes_count {} : {}", candidate_id, votes_count);
-                        break;
+                    let t = Instant::now();
+                    Delay::new(Duration::from_millis(200 + delay)).await;
+
+                    let done = {
+                        let guard = clone.lock().unwrap();
+                        let state = guard.state.lock().unwrap();
+
+                        match state.last_heartbeat {
+                            Some(i) => {
+                                debug!("last_heartbeat {} : {} {}, {}", candidate_id, i.elapsed().as_millis(), t.elapsed().as_millis(), i > t);
+                                if i > t {
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false
+                        }
+                    };
+
+                    if done {
+                        continue;
+                    }
+
+                    loop {
+                        let term = {
+                            let guard = clone.lock().unwrap();
+                            let mut state = guard.state.lock().unwrap();
+                            state.voted_for = Some(candidate_id);
+                            state.term += 1;
+                            state.term
+                        };
+
+                        let args = RequestVoteArgs {
+                            term,
+                            candidate_id,
+                            last_log_index: 0,
+                            last_log_term: 0,
+                        };
+
+                        let fut_votes = (0..peers.len())
+                            .into_iter()
+                            .filter(|&i| i != candidate_id as usize)
+                            .map(|i| {
+                                debug!("send_request_vote {} -> {}", candidate_id, i);
+
+                                let peer_clone = peers[i].clone();
+                                let args_clone = args.clone();
+
+                                let (tx, rx) = channel();
+
+                                peers[i].spawn(async move {
+                                    let res = peer_clone.request_vote(&args_clone).await.map_err(Error::Rpc);
+                                    tx.send(res).unwrap();
+                                });
+
+                                rx
+                            })
+                            .map(|rx| async move {
+                                select! {
+                                    r = rx.fuse() => r.unwrap().unwrap(),
+                                    _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => RequestVoteReply{
+                                        vote_granted: false,
+                                        ..Default::default()
+                                    },
+                                }
+                            })
+                            .collect::<Vec<_>>();
+
+                        let votes = join_all(fut_votes).await;
+
+                        let guard = clone.lock().unwrap();
+                        let mut state = guard.state.lock().unwrap();
+
+                        let max_term = votes.iter().fold(state.term, |acc, reply| max(acc, reply.term));
+
+                        if max_term > state.term {
+                            state.term = max_term;
+                            state.is_leader = false;
+                            state.voted_for = None;
+                            break;
+                        }
+
+                        let votes_count = votes.iter().fold(1, |acc, reply| {
+                            if reply.vote_granted {
+                                return acc + 1;
+                            }
+
+                            acc
+                        });
+
+                        if votes_count >= peers.len() / 2 + 1 {
+                            state.is_leader = true;
+                            debug!("votes_count {} : {}", candidate_id, votes_count);
+                            break;
+                        }
                     }
                 }
-            }
+            });
         });
 
         Node { raft }
