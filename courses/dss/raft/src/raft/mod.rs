@@ -396,8 +396,6 @@ impl Node {
                             .into_iter()
                             .filter(|&i| i != candidate_id as usize)
                             .map(|i| {
-                                debug!("send_request_vote {} -> {}", candidate_id, i);
-
                                 let peer_clone = peers[i].clone();
                                 let args_clone = args.clone();
 
@@ -445,7 +443,6 @@ impl Node {
 
                         if votes_count >= peers.len() / 2 + 1 {
                             state.is_leader = true;
-                            debug!("votes_count {} : {}", candidate_id, votes_count);
                             break;
                         }
                     }
