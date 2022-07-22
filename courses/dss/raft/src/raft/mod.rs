@@ -174,20 +174,14 @@ impl Raft {
         server: usize,
         args: RequestVoteArgs,
     ) -> Receiver<Result<RequestVoteReply>> {
-        // Your code here if you want the rpc becomes async.
-        // Example:
-        // ```
         let peer = &self.peers[server];
         let peer_clone = peer.clone();
         let (tx, rx) = channel();
         peer.spawn(async move {
             let res = peer_clone.request_vote(&args).await.map_err(Error::Rpc);
-            tx.send(res).unwrap();
+            let _ = tx.send(res);
         });
         rx
-        // ```
-        // let (tx, rx) = sync_channel::<Result<RequestVoteReply>>(1);
-        // crate::your_code_here((server, args, tx, rx))
     }
 
     fn send_append_entries(
@@ -200,7 +194,7 @@ impl Raft {
         let (tx, rx) = channel();
         peer.spawn(async move {
             let res = peer_clone.append_entries(&args).await.map_err(Error::Rpc);
-            tx.send(res).unwrap();
+            let _ = tx.send(res);
         });
         rx
     }
@@ -303,31 +297,20 @@ impl Node {
                         Delay::new(Duration::from_millis(20)).await;
                         let term = { clone.lock().unwrap().state.lock().unwrap().term() };
 
-                        let args = AppendEntriesArgs{
-                            term,
-                            leader_id: candidate_id,
-                            prev_log_index: 0,
-                            prev_log_term: 0,
-                            entries: Default::default(),
-                            leader_commit: 0,
-                        };
-
                         let fut_replies = (0..peers.len())
                             .into_iter()
                             .filter(|&i| i != candidate_id as usize)
                             .map(|i| {
+                                let args = AppendEntriesArgs{
+                                    term,
+                                    leader_id: candidate_id,
+                                    prev_log_index: 0,
+                                    prev_log_term: 0,
+                                    entries: Default::default(),
+                                    leader_commit: 0,
+                                };
 
-                                let peer_clone = peers[i].clone();
-                                let args_clone = args.clone();
-
-                                let (tx, rx) = channel();
-
-                                peers[i].spawn(async move {
-                                    let res = peer_clone.append_entries(&args_clone).await.map_err(Error::Rpc);
-                                    let _ = tx.send(res);
-                                });
-
-                                rx
+                                clone.lock().unwrap().send_append_entries(i, args)
                             })
                             .map(|rx| async move {
                                 select! {
@@ -385,28 +368,18 @@ impl Node {
                             state.term
                         };
 
-                        let args = RequestVoteArgs {
-                            term,
-                            candidate_id,
-                            last_log_index: 0,
-                            last_log_term: 0,
-                        };
-
                         let fut_votes = (0..peers.len())
                             .into_iter()
                             .filter(|&i| i != candidate_id as usize)
                             .map(|i| {
-                                let peer_clone = peers[i].clone();
-                                let args_clone = args.clone();
+                                let args = RequestVoteArgs {
+                                    term,
+                                    candidate_id,
+                                    last_log_index: 0,
+                                    last_log_term: 0,
+                                };
 
-                                let (tx, rx) = channel();
-
-                                peers[i].spawn(async move {
-                                    let res = peer_clone.request_vote(&args_clone).await.map_err(Error::Rpc);
-                                    let _ = tx.send(res);
-                                });
-
-                                rx
+                                clone.lock().unwrap().send_request_vote(i, args)
                             })
                             .map(|rx| async move {
                                 select! {
