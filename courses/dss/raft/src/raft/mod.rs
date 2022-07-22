@@ -324,14 +324,14 @@ impl Node {
 
                                 peers[i].spawn(async move {
                                     let res = peer_clone.append_entries(&args_clone).await.map_err(Error::Rpc);
-                                    tx.send(res).unwrap();
+                                    let _ = tx.send(res);
                                 });
 
                                 rx
                             })
                             .map(|rx| async move {
                                 select! {
-                                    r = rx.fuse() => r.unwrap().unwrap(),
+                                    r = rx.fuse() => r.unwrap().unwrap_or_default(),
                                     _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default(),
                                 }
                             })
@@ -403,14 +403,17 @@ impl Node {
 
                                 peers[i].spawn(async move {
                                     let res = peer_clone.request_vote(&args_clone).await.map_err(Error::Rpc);
-                                    tx.send(res).unwrap();
+                                    let _ = tx.send(res);
                                 });
 
                                 rx
                             })
                             .map(|rx| async move {
                                 select! {
-                                    r = rx.fuse() => r.unwrap().unwrap(),
+                                    r = rx.fuse() => r.unwrap().unwrap_or(RequestVoteReply{
+                                        vote_granted: false,
+                                        ..Default::default()
+                                    }),
                                     _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => RequestVoteReply{
                                         vote_granted: false,
                                         ..Default::default()
