@@ -326,11 +326,12 @@ impl Node {
                         let max_term = replies.iter().fold(0, |acc, reply| max(acc, reply.term));
 
                         let mut guard = clone.lock().unwrap();
+                        let state = &mut guard.state;
 
-                        if max_term > guard.state.term {
-                            guard.state.term = max_term;
+                        if max_term > state.term {
+                            state.term = max_term;
+                            state.is_leader = false;
                             guard.voted_for = None;
-                            guard.state.is_leader = false;
                         }
 
                         continue;
@@ -361,8 +362,9 @@ impl Node {
                     loop {
                         let term = {
                             let mut guard = clone.lock().unwrap();
-                            guard.voted_for = Some(candidate_id);
+
                             guard.state.term += 1;
+                            guard.voted_for = Some(candidate_id);
                             guard.state.term
                         };
 
