@@ -401,6 +401,7 @@ impl Node {
 
                                 let (tx, rx) = channel();
 
+                                debug!("request_vote {} -> {} ({})", candidate_id, i, args.term);
                                 peers[i].spawn(async move {
                                     let res = peer_clone.request_vote(&args_clone).await.map_err(Error::Rpc);
                                     let _ = tx.send(res);
@@ -418,10 +419,10 @@ impl Node {
 
                         let votes = join_all(fut_votes).await;
 
+                        let max_term = votes.iter().fold(0, |acc, reply| max(acc, reply.term));
+
                         let guard = clone.lock().unwrap();
                         let mut state = guard.state.lock().unwrap();
-
-                        let max_term = votes.iter().fold(state.term, |acc, reply| max(acc, reply.term));
 
                         if max_term > state.term {
                             state.term = max_term;
@@ -430,7 +431,12 @@ impl Node {
                             break;
                         }
 
+                        if state.term > term {
+                            break;
+                        }
+
                         let votes_count = votes.iter().fold(1, |acc, reply| {
+                            debug!("request_vote REPLY {} : {}", candidate_id, reply.vote_granted);
                             if reply.vote_granted {
                                 return acc + 1;
                             }
@@ -439,6 +445,7 @@ impl Node {
                         });
 
                         if votes_count >= peers.len() / 2 + 1 {
+                            debug!("{} votes_count {} / {}", candidate_id, votes_count, peers.len());
                             state.is_leader = true;
                             break;
                         }
@@ -549,6 +556,8 @@ impl RaftService for Node {
         let raft = self.raft.lock().unwrap();
         let mut state = raft.state.lock().unwrap();
 
+        debug!("request_vote {} <- {} ({})", raft.me, args.candidate_id, args.term);
+
         if args.term < state.term {
             return Ok(RequestVoteReply {
                 term: state.term,
@@ -566,14 +575,7 @@ impl RaftService for Node {
             state.voted_for = Some(args.candidate_id);
 
             let t = Instant::now();
-
-            if let Some(i) = state.last_heartbeat {
-                if i < t {
-                    state.last_heartbeat = Some(t)
-                }
-            } else {
-                state.last_heartbeat = Some(t)
-            }
+            state.last_heartbeat = Some(t);
 
             return Ok(RequestVoteReply {
                 term: args.term,
@@ -605,14 +607,7 @@ impl RaftService for Node {
         }
 
         let t = Instant::now();
-
-        if let Some(i) = state.last_heartbeat {
-            if i < t {
-                state.last_heartbeat = Some(t)
-            }
-        } else {
-            state.last_heartbeat = Some(t)
-        }
+        state.last_heartbeat = Some(t);
 
         Ok(AppendEntriesReply {
             term: args.term,
