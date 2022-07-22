@@ -51,9 +51,6 @@ pub struct Log {
 pub struct State {
     pub term: u64,
     pub is_leader: bool,
-
-    pub voted_for: Option<u64>,
-    pub last_heartbeat: Option<Instant>,
 }
 
 impl State {
@@ -75,7 +72,7 @@ pub struct Raft {
     persister: Mutex<Box<dyn Persister>>,
     // this peer's index into peers[]
     me: usize,
-    state: Arc<Mutex<State>>,
+    state: State,
     // Your data here (2A, 2B, 2C).
     // Look at the paper's Figure 2 for a description of what
     // state a Raft server must maintain.
@@ -84,6 +81,8 @@ pub struct Raft {
     last_applied: u64,
     next_index: Vec<u64>,
     match_index: Vec<u64>,
+    voted_for: Option<u64>,
+    last_heartbeat: Option<Instant>,
 }
 
 impl Raft {
@@ -108,12 +107,14 @@ impl Raft {
             peers,
             persister,
             me,
-            state: Arc::default(),
+            state: Default::default(),
             log: Vec::default(),
             commit_index: 0,
             last_applied: 0,
             next_index: Vec::default(),
             match_index: Vec::default(),
+            voted_for: Default::default(),
+            last_heartbeat: Default::default(),
         };
 
         // initialize from state persisted before a crash
@@ -291,11 +292,11 @@ impl Node {
         thread::spawn(move || {
             block_on(async {
                 loop {
-                    let is_leader = { clone.lock().unwrap().state.lock().unwrap().is_leader() };
+                    let is_leader = { clone.lock().unwrap().state.is_leader() };
 
                     if is_leader {
                         Delay::new(Duration::from_millis(20)).await;
-                        let term = { clone.lock().unwrap().state.lock().unwrap().term() };
+                        let term = { clone.lock().unwrap().state.term() };
 
                         let fut_replies = (0..peers.len())
                             .into_iter()
@@ -322,15 +323,14 @@ impl Node {
 
                         let replies = join_all(fut_replies).await;
 
-                        let guard = clone.lock().unwrap();
-                        let mut state = guard.state.lock().unwrap();
+                        let max_term = replies.iter().fold(0, |acc, reply| max(acc, reply.term));
 
-                        let max_term = replies.iter().fold(state.term, |acc, reply| max(acc, reply.term));
+                        let mut guard = clone.lock().unwrap();
 
-                        if max_term > state.term {
-                            state.term = max_term;
-                            state.voted_for = None;
-                            state.is_leader = false;
+                        if max_term > guard.state.term {
+                            guard.state.term = max_term;
+                            guard.voted_for = None;
+                            guard.state.is_leader = false;
                         }
 
                         continue;
@@ -341,9 +341,8 @@ impl Node {
 
                     let done = {
                         let guard = clone.lock().unwrap();
-                        let state = guard.state.lock().unwrap();
 
-                        match state.last_heartbeat {
+                        match guard.last_heartbeat {
                             Some(i) => {
                                 if i > t {
                                     true
@@ -361,11 +360,10 @@ impl Node {
 
                     loop {
                         let term = {
-                            let guard = clone.lock().unwrap();
-                            let mut state = guard.state.lock().unwrap();
-                            state.voted_for = Some(candidate_id);
-                            state.term += 1;
-                            state.term
+                            let mut guard = clone.lock().unwrap();
+                            guard.voted_for = Some(candidate_id);
+                            guard.state.term += 1;
+                            guard.state.term
                         };
 
                         let fut_votes = (0..peers.len())
@@ -393,13 +391,13 @@ impl Node {
 
                         let max_term = votes.iter().fold(0, |acc, reply| max(acc, reply.term));
 
-                        let guard = clone.lock().unwrap();
-                        let mut state = guard.state.lock().unwrap();
+                        let mut guard = clone.lock().unwrap();
+                        let state = &mut guard.state;
 
                         if max_term > state.term {
                             state.term = max_term;
                             state.is_leader = false;
-                            state.voted_for = None;
+                            guard.voted_for = None;
                             break;
                         }
 
@@ -456,7 +454,7 @@ impl Node {
         // Your code here.
         // Example:
         // self.raft.term
-        self.raft.lock().unwrap().state.lock().unwrap().term()
+        self.raft.lock().unwrap().state.term()
         // crate::your_code_here(())
     }
 
@@ -465,7 +463,7 @@ impl Node {
         // Your code here.
         // Example:
         // self.raft.leader_id == self.id
-        self.raft.lock().unwrap().state.lock().unwrap().is_leader()
+        self.raft.lock().unwrap().state.is_leader()
         // crate::your_code_here(())
     }
 
@@ -525,8 +523,8 @@ impl RaftService for Node {
     // CAVEATS: Please avoid locking or sleeping here, it may jam the network.
     async fn request_vote(&self, args: RequestVoteArgs) -> labrpc::Result<RequestVoteReply> {
         // Your code here (2A, 2B).
-        let raft = self.raft.lock().unwrap();
-        let mut state = raft.state.lock().unwrap();
+        let mut guard = self.raft.lock().unwrap();
+        let state = &mut guard.state;
 
         if args.term < state.term {
             return Ok(RequestVoteReply {
@@ -538,14 +536,14 @@ impl RaftService for Node {
         if args.term > state.term {
             state.term = args.term;
             state.is_leader = false;
-            state.voted_for = None;
+            guard.voted_for = None;
         }
         
-        if state.voted_for.is_none() || state.voted_for == Some(args.candidate_id) {
-            state.voted_for = Some(args.candidate_id);
+        if guard.voted_for.is_none() || guard.voted_for == Some(args.candidate_id) {
+            guard.voted_for = Some(args.candidate_id);
 
             let t = Instant::now();
-            state.last_heartbeat = Some(t);
+            guard.last_heartbeat = Some(t);
 
             return Ok(RequestVoteReply {
                 term: args.term,
@@ -560,8 +558,8 @@ impl RaftService for Node {
     }
 
     async fn append_entries(&self, args: AppendEntriesArgs) -> labrpc::Result<AppendEntriesReply> {
-        let guard = self.raft.lock().unwrap();
-        let mut state = guard.state.lock().unwrap();
+        let mut guard = self.raft.lock().unwrap();
+        let state = &mut guard.state;
 
         if args.term < state.term {
             return Ok(AppendEntriesReply {
@@ -573,11 +571,11 @@ impl RaftService for Node {
         if args.term > state.term {
             state.term = args.term;
             state.is_leader = false;
-            state.voted_for = None;
+            guard.voted_for = None;
         }
 
         let t = Instant::now();
-        state.last_heartbeat = Some(t);
+        guard.last_heartbeat = Some(t);
 
         Ok(AppendEntriesReply {
             term: args.term,
