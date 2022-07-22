@@ -316,7 +316,6 @@ impl Node {
                             .into_iter()
                             .filter(|&i| i != candidate_id as usize)
                             .map(|i| {
-                                debug!("send_append_entries {} -> {}", candidate_id, i);
 
                                 let peer_clone = peers[i].clone();
                                 let args_clone = args.clone();
@@ -363,7 +362,6 @@ impl Node {
 
                         match state.last_heartbeat {
                             Some(i) => {
-                                debug!("last_heartbeat {} : {} {}, {}", candidate_id, i.elapsed().as_millis(), t.elapsed().as_millis(), i > t);
                                 if i > t {
                                     true
                                 } else {
@@ -485,7 +483,7 @@ impl Node {
         // Your code here.
         // Example:
         // self.raft.term
-        self.raft.to_owned().lock().unwrap().state.to_owned().lock().unwrap().term()
+        self.raft.lock().unwrap().state.lock().unwrap().term()
         // crate::your_code_here(())
     }
 
@@ -494,7 +492,7 @@ impl Node {
         // Your code here.
         // Example:
         // self.raft.leader_id == self.id
-        self.raft.to_owned().lock().unwrap().state.to_owned().lock().unwrap().is_leader()
+        self.raft.lock().unwrap().state.lock().unwrap().is_leader()
         // crate::your_code_here(())
     }
 
@@ -503,8 +501,7 @@ impl Node {
         State {
             term: self.term(),
             is_leader: self.is_leader(),
-            last_heartbeat: self.raft.lock().unwrap().state.lock().unwrap().last_heartbeat,
-            voted_for: self.raft.lock().unwrap().state.lock().unwrap().voted_for,
+            ..Default::default()
         }
     }
 
