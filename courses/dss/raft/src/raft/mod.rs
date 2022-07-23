@@ -41,10 +41,11 @@ pub enum ApplyMsg {
     },
 }
 
-pub struct Log {
-    pub command: Vec<u8>,
-    pub term: u64,
-}
+// #[derive(Default)]
+// pub struct Log {
+//     pub command: u64,
+//     pub term: u64,
+// }
 
 /// State of a raft peer.
 #[derive(Default, Clone, Debug)]
@@ -76,12 +77,15 @@ pub struct Raft {
     // Your data here (2A, 2B, 2C).
     // Look at the paper's Figure 2 for a description of what
     // state a Raft server must maintain.
+    voted_for: Option<u64>,
     log: Vec<Log>,
+
     commit_index: u64,
     last_applied: u64,
+
     next_index: Vec<u64>,
     match_index: Vec<u64>,
-    voted_for: Option<u64>,
+
     last_heartbeat: Option<Instant>,
 }
 
@@ -200,22 +204,59 @@ impl Raft {
         rx
     }
 
-    fn start<M>(&self, command: &M) -> Result<(u64, u64)>
+    fn start<M>(&mut self, command: &M) -> Result<(u64, u64)>
     where
         M: labcodec::Message,
     {
-        let index = 0;
-        let term = 0;
-        let is_leader = true;
+        let is_leader = self.state.is_leader();
+
+        if !is_leader {
+            return Err(Error::NotLeader)
+        }
+
+        let index = self.log.len() as u64 + 1;
+        let term = self.state.term();
         let mut buf = vec![];
         labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
         // Your code here (2B).
+        block_on(async {
+            self.log.push(Log{
+                entry: buf,
+                term,
+            });
 
-        if is_leader {
-            Ok((index, term))
-        } else {
-            Err(Error::NotLeader)
-        }
+            let fut_replies = (0..self.peers.len())
+                .into_iter()
+                .filter(|&i| i != self.me as usize)
+                .map(|i| {
+                    let args = AppendEntriesArgs{
+                        term,
+                        leader_id: self.me as u64,
+                        leader_commit: self.commit_index,
+                        prev_log_index: index - 1,
+                        prev_log_term: {
+                            match self.log.get(index as usize - 1) {
+                                Some(log) => log.term,
+                                None => 0,
+                            }
+                        },
+                        entries: self.log.to_vec(),
+                    };
+
+                    self.send_append_entries(i, args)
+                })
+                .map(|rx| async move {
+                    select! {
+                        r = rx.fuse() => r.unwrap().unwrap_or_default(),
+                        _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default(),
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            join_all(fut_replies).await;
+        });
+
+        Ok((index, term))
     }
 
     fn cond_install_snapshot(
@@ -298,13 +339,15 @@ impl Node {
                 .into_iter()
                 .filter(|&i| i != candidate_id as usize)
                 .map(|i| {
+                    let guard = clone.lock().unwrap();
+
                     let args = AppendEntriesArgs{
                         term,
                         leader_id: candidate_id,
                         ..Default::default()
                     };
 
-                    clone.lock().unwrap().send_append_entries(i, args)
+                    guard.send_append_entries(i, args)
                 })
                 .map(|rx| async move {
                     select! {
@@ -366,13 +409,18 @@ impl Node {
                 .into_iter()
                 .filter(|&i| i != candidate_id as usize)
                 .map(|i| {
+                    let guard = clone.lock().unwrap();
+
+                    let last_log_term = guard.log.last().unwrap_or(&Log{..Default::default()}).term;
+
                     let args = RequestVoteArgs {
                         term,
                         candidate_id,
-                        ..Default::default()
+                        last_log_index: guard.log.len() as u64,
+                        last_log_term,
                     };
 
-                    clone.lock().unwrap().send_request_vote(i, args)
+                    guard.send_request_vote(i, args)
                 })
                 .map(|rx| async move {
                     select! {
@@ -456,7 +504,8 @@ impl Node {
         // Your code here.
         // Example:
         // self.raft.start(command)
-        crate::your_code_here(command)
+        let mut raft = self.raft.lock().unwrap();
+        raft.start(command)
     }
 
     /// The current term of this peer.
@@ -548,8 +597,13 @@ impl RaftService for Node {
             state.is_leader = false;
             guard.voted_for = None;
         }
-        
-        if guard.voted_for.is_none() || guard.voted_for == Some(args.candidate_id) {
+
+        let last_log_term = guard.log.last().unwrap_or(&Log{..Default::default()}).term;
+
+        let can_vote = guard.voted_for.is_none() || guard.voted_for == Some(args.candidate_id);
+        let is_up_to_date = args.last_log_term > last_log_term || (args.last_log_term == last_log_term && args.last_log_index as usize >= guard.log.len());
+
+        if can_vote && is_up_to_date {
             guard.voted_for = Some(args.candidate_id);
 
             guard.last_heartbeat = Some(Instant::now());
@@ -581,6 +635,36 @@ impl RaftService for Node {
             state.term = args.term;
             state.is_leader = false;
             guard.voted_for = None;
+        }
+
+        if !args.entries.is_empty() {
+            let prev_log = match args.prev_log_index {
+                0 => None,
+                _ => guard.log.get(args.prev_log_index as usize - 1),
+            };
+
+            if prev_log.is_some() && prev_log.unwrap().term != args.prev_log_term {
+                return Ok(AppendEntriesReply {
+                    term: args.term,
+                    success: false,
+                })
+            }
+
+            for i in 0..args.entries.len() {
+                let log = args.entries.get(i).unwrap();
+
+                if guard.log.get(i).is_none() {
+                    guard.log.push(log.clone());
+                }
+
+                if guard.log.get(i).unwrap().term != log.term {
+                    guard.log = guard.log[..i].to_vec();
+                }
+            }
+
+            if guard.log.len() > args.entries.len() {
+                warn!("guard.log.len() > args.entries.len()");
+            }
         }
 
         guard.last_heartbeat = Some(Instant::now());
