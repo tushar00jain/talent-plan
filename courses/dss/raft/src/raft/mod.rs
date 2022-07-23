@@ -277,152 +277,164 @@ pub struct Node {
 }
 
 impl Node {
+    async fn start_leader_loop(&self) {
+        let clone = &self.raft;
+
+        let candidate_id = { clone.lock().unwrap().me as u64 };
+        let peers = { clone.lock().unwrap().peers.clone() };
+
+        loop {
+            let is_leader = { clone.lock().unwrap().state.is_leader() };
+
+            if !is_leader {
+                return;
+            }
+
+            Delay::new(Duration::from_millis(20)).await;
+
+            let term = { clone.lock().unwrap().state.term() };
+
+            let fut_replies = (0..peers.len())
+                .into_iter()
+                .filter(|&i| i != candidate_id as usize)
+                .map(|i| {
+                    let args = AppendEntriesArgs{
+                        term,
+                        leader_id: candidate_id,
+                        ..Default::default()
+                    };
+
+                    clone.lock().unwrap().send_append_entries(i, args)
+                })
+                .map(|rx| async move {
+                    select! {
+                        r = rx.fuse() => r.unwrap().unwrap_or_default(),
+                        _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default(),
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let replies = join_all(fut_replies).await;
+
+            let max_term = replies.iter().fold(0, |acc, reply| max(acc, reply.term));
+
+            let mut guard = clone.lock().unwrap();
+            let state = &mut guard.state;
+
+            if max_term > state.term {
+                state.term = max_term;
+                state.is_leader = false;
+                guard.voted_for = None;
+            }
+        }
+    }
+
+    async fn start_follower_loop(&self) {
+        let clone = &self.raft;
+
+        let delay = rand::thread_rng().gen_range(50, 100);
+
+        loop {
+            let deadline = Instant::now();
+
+            Delay::new(Duration::from_millis(200 + delay)).await;
+
+            let guard = clone.lock().unwrap();
+
+            if guard.last_heartbeat.is_none() || guard.last_heartbeat.unwrap() < deadline {
+                return
+            }
+        }
+    }
+
+    async fn start_candidate_loop(&self) {
+        let clone = &self.raft;
+
+        let candidate_id = { clone.lock().unwrap().me as u64 };
+        let peers = { clone.lock().unwrap().peers.clone() };
+
+        loop {
+            let term = {
+                let mut guard = clone.lock().unwrap();
+
+                guard.state.term += 1;
+                guard.voted_for = Some(candidate_id);
+                guard.state.term
+            };
+
+            let fut_votes = (0..peers.len())
+                .into_iter()
+                .filter(|&i| i != candidate_id as usize)
+                .map(|i| {
+                    let args = RequestVoteArgs {
+                        term,
+                        candidate_id,
+                        ..Default::default()
+                    };
+
+                    clone.lock().unwrap().send_request_vote(i, args)
+                })
+                .map(|rx| async move {
+                    select! {
+                        r = rx.fuse() => r.unwrap().unwrap_or_default(),
+                        _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default()
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let votes = join_all(fut_votes).await;
+
+            let max_term = votes.iter().fold(0, |acc, reply| max(acc, reply.term));
+
+            let mut guard = clone.lock().unwrap();
+            let state = &mut guard.state;
+
+            if max_term > state.term {
+                state.term = max_term;
+                state.is_leader = false;
+                guard.voted_for = None;
+                return;
+            }
+
+            // state got corrupted while requesting vote
+            // i.e. someone else requested vote
+            if state.term > term {
+                return;
+            }
+
+            let votes_count = votes.iter().fold(1, |acc, reply| {
+                if reply.vote_granted {
+                    return acc + 1;
+                }
+
+                acc
+            });
+
+            if votes_count >= peers.len() / 2 + 1 {
+                state.is_leader = true;
+                return;
+            }
+        }
+    }
+
     /// Create a new raft service.
-    pub fn new(rf: Raft) -> Node {
+    pub fn new(raft: Raft) -> Node {
         // Your code here.
-        let candidate_id = rf.me as u64;
-        let peers = rf.peers.clone();
+        let node = Node { raft: Arc::new(Mutex::new(raft)) };
 
-        let raft = Arc::new(Mutex::new(rf));
-        let clone = raft.clone();
-
-        let mut rng = rand::thread_rng();
-        let delay = rng.gen_range(50, 100);
+        let clone = node.clone();
 
         thread::spawn(move || {
             block_on(async {
                 loop {
-                    let is_leader = { clone.lock().unwrap().state.is_leader() };
-
-                    if is_leader {
-                        Delay::new(Duration::from_millis(20)).await;
-                        let term = { clone.lock().unwrap().state.term() };
-
-                        let fut_replies = (0..peers.len())
-                            .into_iter()
-                            .filter(|&i| i != candidate_id as usize)
-                            .map(|i| {
-                                let args = AppendEntriesArgs{
-                                    term,
-                                    leader_id: candidate_id,
-                                    ..Default::default()
-                                };
-
-                                clone.lock().unwrap().send_append_entries(i, args)
-                            })
-                            .map(|rx| async move {
-                                select! {
-                                    r = rx.fuse() => r.unwrap().unwrap_or_default(),
-                                    _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default(),
-                                }
-                            })
-                            .collect::<Vec<_>>();
-
-                        let replies = join_all(fut_replies).await;
-
-                        let max_term = replies.iter().fold(0, |acc, reply| max(acc, reply.term));
-
-                        let mut guard = clone.lock().unwrap();
-                        let state = &mut guard.state;
-
-                        if max_term > state.term {
-                            state.term = max_term;
-                            state.is_leader = false;
-                            guard.voted_for = None;
-                        }
-
-                        continue;
-                    }
-
-                    let t = Instant::now();
-                    Delay::new(Duration::from_millis(200 + delay)).await;
-
-                    let done = {
-                        let guard = clone.lock().unwrap();
-
-                        match guard.last_heartbeat {
-                            Some(i) => {
-                                if i > t {
-                                    true
-                                } else {
-                                    false
-                                }
-                            }
-                            _ => false
-                        }
-                    };
-
-                    if done {
-                        continue;
-                    }
-
-                    loop {
-                        let term = {
-                            let mut guard = clone.lock().unwrap();
-
-                            guard.state.term += 1;
-                            guard.voted_for = Some(candidate_id);
-                            guard.state.term
-                        };
-
-                        let fut_votes = (0..peers.len())
-                            .into_iter()
-                            .filter(|&i| i != candidate_id as usize)
-                            .map(|i| {
-                                let args = RequestVoteArgs {
-                                    term,
-                                    candidate_id,
-                                    ..Default::default()
-                                };
-
-                                clone.lock().unwrap().send_request_vote(i, args)
-                            })
-                            .map(|rx| async move {
-                                select! {
-                                    r = rx.fuse() => r.unwrap().unwrap_or_default(),
-                                    _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default()
-                                }
-                            })
-                            .collect::<Vec<_>>();
-
-                        let votes = join_all(fut_votes).await;
-
-                        let max_term = votes.iter().fold(0, |acc, reply| max(acc, reply.term));
-
-                        let mut guard = clone.lock().unwrap();
-                        let state = &mut guard.state;
-
-                        if max_term > state.term {
-                            state.term = max_term;
-                            state.is_leader = false;
-                            guard.voted_for = None;
-                            break;
-                        }
-
-                        // state got corrupted while requesting vote
-                        // i.e. someone else requested vote
-                        if state.term > term {
-                            break;
-                        }
-
-                        let votes_count = votes.iter().fold(1, |acc, reply| {
-                            if reply.vote_granted {
-                                return acc + 1;
-                            }
-
-                            acc
-                        });
-
-                        if votes_count >= peers.len() / 2 + 1 {
-                            state.is_leader = true;
-                            break;
-                        }
-                    }
+                    clone.start_leader_loop().await;
+                    clone.start_follower_loop().await;
+                    clone.start_candidate_loop().await;
                 }
             });
         });
 
-        Node { raft }
+        node
     }
 
     /// the service using Raft (e.g. a k/v server) wants to start
