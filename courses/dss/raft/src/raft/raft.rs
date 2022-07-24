@@ -199,6 +199,37 @@ impl Raft {
         rx
     }
 
+    pub fn commit(&mut self) {
+        let range = (self.commit_index + 1)..=self.log.len() as u64;
+        let n = range.fold(self.commit_index, |acc1, i| {
+                let count = self.match_index.iter().fold(0, |acc2, &j| {
+                        if j >= i {
+                                return acc2 + 1
+                        }
+
+                        acc2
+                });
+
+                if count >= self.peers.len() / 2 + 1 {
+                        return i
+                }
+
+                acc1
+        });
+
+        if n > self.commit_index && self.log.get(n as usize - 1).unwrap().term == self.state.term {
+                for index in self.commit_index+1..=n {
+                    let _ = self.apply_ch.unbounded_send(ApplyMsg::Command {
+                            data: self.log.get(index as usize - 1).unwrap().entry.to_vec(),
+                            index,
+                    });
+
+                    self.commit_index += 1;
+                }
+        }
+
+    }
+
     pub fn start<M>(&mut self, command: &M) -> Result<(u64, u64)>
     where
         M: labcodec::Message,
