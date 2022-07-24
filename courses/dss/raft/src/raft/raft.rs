@@ -227,9 +227,7 @@ impl Raft {
             ..Default::default()
         };
 
-        let len = self.log.len();
-
-        let mut clone = self.clone();
+        let clone = self.clone();
         
         // Your code here (2B).
         self.peers[self.me].spawn(async move {
@@ -247,38 +245,7 @@ impl Raft {
                 })
                 .collect::<Vec<_>>();
 
-            let replies = join_all(fut_replies).await;
-
-            for (i, reply) in replies.iter().enumerate() {
-                if reply.success {
-                    clone.match_index[i] = len as u64;
-                }
-            }
-
-            let range = (clone.commit_index + 1)..=len as u64;
-            let n = range.fold(clone.commit_index, |acc1, i| {
-                let count = clone.match_index.iter().fold(0, |acc2, &j| {
-                    if j >= i {
-                        return acc2 + 1
-                    }
-
-                    acc2
-                });
-
-                if count >= clone.peers.len() / 2 + 1 {
-                    return i
-                }
-
-                acc1
-            });
-
-            if n > clone.commit_index && clone.log.get(n as usize - 1).unwrap().term == clone.state.term {
-                clone.commit_index = n;
-                let _ = clone.apply_ch.unbounded_send(ApplyMsg::Command {
-                    data: clone.log.get(n as usize - 1).unwrap().entry.to_vec(),
-                    index,
-                });
-            }
+            join_all(fut_replies).await;
         });
 
         Ok((index, term))

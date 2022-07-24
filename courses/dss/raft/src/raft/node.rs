@@ -62,7 +62,7 @@ impl Node {
 											term,
 											leader_id: candidate_id,
 											leader_commit: guard.commit_index,
-											entries: Default::default(),
+											entries: guard.log.to_vec(),
 											..Default::default()
 									};
 
@@ -83,10 +83,46 @@ impl Node {
 					let mut guard = clone.lock().unwrap();
 					let state = &mut guard.state;
 
+					let term = state.term;
+
 					if max_term > state.term {
 							state.term = max_term;
 							state.is_leader = false;
 							guard.voted_for = None;
+							return
+					}
+
+					for (i, reply) in replies.iter().enumerate() {
+							if reply.success {
+									guard.match_index[i] = guard.log.len() as u64;
+							}
+					}
+
+					let range = (guard.commit_index + 1)..=guard.log.len() as u64;
+					let n = range.fold(guard.commit_index, |acc1, i| {
+							let count = guard.match_index.iter().fold(0, |acc2, &j| {
+									if j >= i {
+											return acc2 + 1
+									}
+
+									acc2
+							});
+
+							if count >= guard.peers.len() / 2 + 1 {
+									return i
+							}
+
+							acc1
+					});
+
+					if n > guard.commit_index && guard.log.get(n as usize - 1).unwrap().term == term {
+							guard.commit_index = n;
+							for index in guard.commit_index+1..=n {
+								let _ = guard.apply_ch.unbounded_send(ApplyMsg::Command {
+										data: guard.log.get(index as usize - 1).unwrap().entry.to_vec(),
+										index,
+								});
+							}
 					}
 			}
 	}
@@ -179,6 +215,8 @@ impl Node {
 
 					if votes_count >= peers.len() / 2 + 1 {
 							state.is_leader = true;
+							guard.next_index = vec![0; peers.len()];
+							guard.match_index = vec![0; peers.len()];
 							return;
 					}
 			}
