@@ -1,10 +1,8 @@
 use std::cmp::max;
 use std::sync::{Arc, Mutex};
-use std::thread;
 
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot::{Receiver, channel};
-use futures::executor::block_on;
 use futures::future::join_all;
 
 use futures::{select, FutureExt};
@@ -66,11 +64,12 @@ impl State {
 }
 
 // A single Raft peer.
+#[derive(Clone)]
 pub struct Raft {
     // RPC end points of all peers
     peers: Vec<RaftClient>,
     // Object to hold this peer's persisted state
-    persister: Mutex<Box<dyn Persister>>,
+    persister: Arc<Mutex<Box<dyn Persister>>>,
     // this peer's index into peers[]
     me: usize,
     state: State,
@@ -111,7 +110,7 @@ impl Raft {
         // Your initialization code here (2A, 2B, 2C).
         let mut rf = Raft {
             peers,
-            persister,
+            persister: Arc::new(persister),
             me,
             state: Default::default(),
             log: Vec::default(),
@@ -221,34 +220,37 @@ impl Raft {
         let term = self.state.term();
         let mut buf = vec![];
         labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
-        
-        let buf_clone = buf.clone();
-        // Your code here (2B).
-        block_on(async {
-            self.log.push(Log{
-                entry: buf,
-                term,
-            });
 
-            let fut_replies = (0..self.peers.len())
+        let buf_clone = buf.clone();
+
+        self.log.push(Log{
+            entry: buf,
+            term,
+        });
+
+        let clone = self.clone();
+        
+        // Your code here (2B).
+        self.peers[self.me].spawn(async move {
+            let fut_replies = (0..clone.peers.len())
                 .into_iter()
-                .filter(|&i| i != self.me as usize)
+                .filter(|&i| i != clone.me as usize)
                 .map(|i| {
                     let args = AppendEntriesArgs{
                         term,
-                        leader_id: self.me as u64,
-                        leader_commit: self.commit_index,
+                        leader_id: clone.me as u64,
+                        leader_commit: clone.commit_index,
                         prev_log_index: index - 1,
                         prev_log_term: {
-                            match self.log.get(index as usize - 1) {
+                            match clone.log.get(index as usize - 1) {
                                 Some(log) => log.term,
                                 None => 0,
                             }
                         },
-                        entries: self.log.to_vec(),
+                        entries: clone.log.to_vec(),
                     };
 
-                    self.send_append_entries(i, args)
+                    clone.send_append_entries(i, args)
                 })
                 .map(|rx| async move {
                     select! {
@@ -259,7 +261,7 @@ impl Raft {
                 .collect::<Vec<_>>();
 
             join_all(fut_replies).await;
-            let _ = self.apply_ch.unbounded_send(ApplyMsg::Command {
+            let _ = clone.apply_ch.unbounded_send(ApplyMsg::Command {
                 data: buf_clone,
                 index,
             });
@@ -477,18 +479,17 @@ impl Node {
     /// Create a new raft service.
     pub fn new(raft: Raft) -> Node {
         // Your code here.
+        let client = raft.peers[raft.me].clone();
         let node = Node { raft: Arc::new(Mutex::new(raft)) };
 
         let clone = node.clone();
 
-        thread::spawn(move || {
-            block_on(async {
-                loop {
-                    clone.start_leader_loop().await;
-                    clone.start_follower_loop().await;
-                    clone.start_candidate_loop().await;
-                }
-            });
+        client.spawn(async move {
+            loop {
+                clone.start_leader_loop().await;
+                clone.start_follower_loop().await;
+                clone.start_candidate_loop().await;
+            }
         });
 
         node
