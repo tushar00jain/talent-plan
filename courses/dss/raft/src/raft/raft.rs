@@ -245,6 +245,7 @@ impl Raft {
         labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
 
         self.log.push(Log { entry: buf, term });
+        self.match_index[self.me] = self.log.len() as u64;
 
         let args = AppendEntriesArgs {
             term,

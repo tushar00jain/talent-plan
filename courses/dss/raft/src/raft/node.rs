@@ -65,11 +65,11 @@ impl Node {
                         ..Default::default()
                     };
 
-                    guard.send_append_entries(i, args)
+                    (i, guard.send_append_entries(i, args))
                 })
-                .map(|rx| async move {
+                .map(|(i, rx)| async move {
                     select! {
-                        r = rx.fuse() => r.unwrap().unwrap_or_default(),
+                        r = rx.fuse() => (i, r.unwrap().unwrap_or_default()),
                         _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default(),
                     }
                 })
@@ -77,7 +77,7 @@ impl Node {
 
             let replies = join_all(fut_replies).await;
 
-            let max_term = replies.iter().fold(0, |acc, reply| max(acc, reply.term));
+            let max_term = replies.iter().fold(0, |acc, (_, reply)| max(acc, reply.term));
 
             let mut guard = clone.lock().unwrap();
             let state = &mut guard.state;
@@ -89,9 +89,9 @@ impl Node {
                 return;
             }
 
-            for (i, reply) in replies.iter().enumerate() {
+            for (server, reply) in replies {
                 if reply.success {
-                    guard.match_index[i] = guard.log.len() as u64;
+                    guard.match_index[server] = guard.log.len() as u64;
                 }
             }
 
