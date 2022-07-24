@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use futures::channel::mpsc::UnboundedSender;
-use futures::channel::oneshot::{Receiver, channel};
+use futures::channel::oneshot::{channel, Receiver};
 use futures::future::join_all;
 
 use futures::{select, FutureExt};
@@ -202,32 +202,31 @@ impl Raft {
     pub fn commit(&mut self) {
         let range = (self.commit_index + 1)..=self.log.len() as u64;
         let n = range.fold(self.commit_index, |acc1, i| {
-                let count = self.match_index.iter().fold(0, |acc2, &j| {
-                        if j >= i {
-                                return acc2 + 1
-                        }
-
-                        acc2
-                });
-
-                if count >= self.peers.len() / 2 + 1 {
-                        return i
+            let count = self.match_index.iter().fold(0, |acc2, &j| {
+                if j >= i {
+                    return acc2 + 1;
                 }
 
-                acc1
+                acc2
+            });
+
+            if count >= self.peers.len() / 2 + 1 {
+                return i;
+            }
+
+            acc1
         });
 
         if n > self.commit_index && self.log.get(n as usize - 1).unwrap().term == self.state.term {
-                for index in self.commit_index+1..=n {
-                    let _ = self.apply_ch.unbounded_send(ApplyMsg::Command {
-                            data: self.log.get(index as usize - 1).unwrap().entry.to_vec(),
-                            index,
-                    });
+            for index in self.commit_index + 1..=n {
+                let _ = self.apply_ch.unbounded_send(ApplyMsg::Command {
+                    data: self.log.get(index as usize - 1).unwrap().entry.to_vec(),
+                    index,
+                });
 
-                    self.commit_index += 1;
-                }
+                self.commit_index += 1;
+            }
         }
-
     }
 
     pub fn start<M>(&mut self, command: &M) -> Result<(u64, u64)>
@@ -237,7 +236,7 @@ impl Raft {
         let is_leader = self.state.is_leader();
 
         if !is_leader {
-            return Err(Error::NotLeader)
+            return Err(Error::NotLeader);
         }
 
         let index = self.log.len() as u64 + 1;
@@ -245,12 +244,9 @@ impl Raft {
         let mut buf = vec![];
         labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
 
-        self.log.push(Log{
-            entry: buf,
-            term,
-        });
+        self.log.push(Log { entry: buf, term });
 
-        let args = AppendEntriesArgs{
+        let args = AppendEntriesArgs {
             term,
             leader_id: self.me as u64,
             leader_commit: self.commit_index,
@@ -259,7 +255,7 @@ impl Raft {
         };
 
         let clone = self.clone();
-        
+
         // Your code here (2B).
         self.peers[self.me].spawn(async move {
             let fut_replies = (0..clone.peers.len())
