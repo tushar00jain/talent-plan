@@ -116,12 +116,13 @@ impl Node {
 					});
 
 					if n > guard.commit_index && guard.log.get(n as usize - 1).unwrap().term == term {
-							guard.commit_index = n;
 							for index in guard.commit_index+1..=n {
 								let _ = guard.apply_ch.unbounded_send(ApplyMsg::Command {
 										data: guard.log.get(index as usize - 1).unwrap().entry.to_vec(),
 										index,
 								});
+
+								guard.commit_index += 1;
 							}
 					}
 			}
@@ -425,12 +426,12 @@ impl RaftService for Node {
 
         if guard.commit_index > guard.last_applied {
             for index in (guard.last_applied+1)..=guard.commit_index {
-                guard.last_applied += 1;
-
                 let _ = guard.apply_ch.unbounded_send(ApplyMsg::Command {
                     data: guard.log.get(index as usize - 1).unwrap().entry.to_vec(),
                     index,
                 });
+
+								guard.last_applied += 1;
             }
         }
 
