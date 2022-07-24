@@ -6,7 +6,7 @@ use crate::raft;
 use std::sync::Mutex;
 
 pub struct KvServer {
-    pub rf: raft::Node,
+    pub rf: raft::node::Node,
     me: usize,
     // snapshot if log grows this big
     maxraftstate: Option<usize>,
@@ -23,7 +23,7 @@ impl KvServer {
         // You may need initialization code here.
 
         let (tx, apply_ch) = unbounded();
-        let rf = raft::Raft::new(servers, me, persister, tx);
+        let rf = raft::raft::Raft::new(servers, me, persister, tx);
 
         crate::your_code_here((rf, maxraftstate, apply_ch))
     }
@@ -86,9 +86,9 @@ impl Node {
         self.get_state().is_leader()
     }
 
-    pub fn get_state(&self) -> raft::State {
+    pub fn get_state(&self) -> raft::raft::State {
         // Your code here.
-        raft::State {
+        raft::raft::State {
             ..Default::default()
         }
     }

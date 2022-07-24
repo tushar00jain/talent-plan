@@ -66,7 +66,7 @@ pub struct Config {
     pub net: labrpc::Network,
     n: usize,
     // use boxed slice to prohibit grow capacity.
-    pub rafts: Arc<Mutex<Box<[Option<raft::Node>]>>>,
+    pub rafts: Arc<Mutex<Box<[Option<raft::node::Node>]>>>,
     // whether each server is on the net
     pub connected: Box<[bool]>,
     saved: Box<[Arc<SimplePersister>]>,
@@ -396,15 +396,15 @@ impl Config {
         }
 
         let (tx, apply_ch) = unbounded();
-        let rf = raft::Raft::new(clients, i, Mutex::new(Box::new(self.saved[i].clone())), tx);
-        let node = raft::Node::new(rf);
+        let rf = raft::raft::Raft::new(clients, i, Mutex::new(Box::new(self.saved[i].clone())), tx);
+        let node = raft::node::Node::new(rf);
         self.rafts.lock().unwrap()[i] = Some(node.clone());
 
         // listen to messages from Raft indicating newly committed messages.
         let storage = self.storage.clone();
         let rafts = self.rafts.clone();
-        let apply = apply_ch.for_each(move |cmd: raft::ApplyMsg| match cmd {
-            raft::ApplyMsg::Command { data, index } => {
+        let apply = apply_ch.for_each(move |cmd: raft::raft::ApplyMsg| match cmd {
+            raft::raft::ApplyMsg::Command { data, index } => {
                 // debug!("apply {}", index);
                 let entry = labcodec::decode(&data).expect("committed command is not an entry");
                 let mut s = storage.lock().unwrap();
@@ -435,7 +435,7 @@ impl Config {
                 }
                 future::ready(())
             }
-            raft::ApplyMsg::Snapshot { data, index, term } if snapshot => {
+            raft::raft::ApplyMsg::Snapshot { data, index, term } if snapshot => {
                 // debug!("install snapshot {}", index);
                 if rafts.lock().unwrap()[i]
                     .as_ref()
@@ -456,7 +456,7 @@ impl Config {
         self.net.spawn_poller(apply);
 
         let mut builder = labrpc::ServerBuilder::new(format!("{}", i));
-        raft::add_raft_service(node, &mut builder).unwrap();
+        raft::config::add_raft_service(node, &mut builder).unwrap();
         let srv = builder.build();
         self.net.add_server(srv);
     }
