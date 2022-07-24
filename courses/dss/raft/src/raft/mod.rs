@@ -77,6 +77,8 @@ pub struct Raft {
     // Your data here (2A, 2B, 2C).
     // Look at the paper's Figure 2 for a description of what
     // state a Raft server must maintain.
+    apply_ch: UnboundedSender<ApplyMsg>,
+
     voted_for: Option<u64>,
     log: Vec<Log>,
 
@@ -102,7 +104,7 @@ impl Raft {
         peers: Vec<RaftClient>,
         me: usize,
         persister: Mutex<Box<dyn Persister>>,
-        _apply_ch: UnboundedSender<ApplyMsg>,
+        apply_ch: UnboundedSender<ApplyMsg>,
     ) -> Raft {
         let raft_state = persister.lock().unwrap().raft_state();
 
@@ -119,6 +121,7 @@ impl Raft {
             match_index: Vec::default(),
             voted_for: Default::default(),
             last_heartbeat: Default::default(),
+            apply_ch,
         };
 
         // initialize from state persisted before a crash
@@ -218,6 +221,8 @@ impl Raft {
         let term = self.state.term();
         let mut buf = vec![];
         labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
+        
+        let buf_clone = buf.clone();
         // Your code here (2B).
         block_on(async {
             self.log.push(Log{
@@ -254,6 +259,10 @@ impl Raft {
                 .collect::<Vec<_>>();
 
             join_all(fut_replies).await;
+            let _ = self.apply_ch.unbounded_send(ApplyMsg::Command {
+                data: buf_clone,
+                index,
+            });
         });
 
         Ok((index, term))
@@ -662,9 +671,10 @@ impl RaftService for Node {
                 }
             }
 
-            if guard.log.len() > args.entries.len() {
-                warn!("guard.log.len() > args.entries.len()");
-            }
+            let _ = guard.apply_ch.unbounded_send(ApplyMsg::Command {
+                data: guard.log.last().unwrap().entry.to_vec(),
+                index: guard.log.len() as u64,
+            });
         }
 
         guard.last_heartbeat = Some(Instant::now());
