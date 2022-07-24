@@ -123,7 +123,11 @@ impl Node {
         let candidate_id = { clone.lock().unwrap().me as u64 };
         let peers = { clone.lock().unwrap().peers.clone() };
 
+        let delay = rand::thread_rng().gen_range(0, 5);
+
         loop {
+            Delay::new(Duration::from_millis(5 + delay)).await;
+
             let term = {
                 let mut guard = clone.lock().unwrap();
 
