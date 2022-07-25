@@ -1,9 +1,7 @@
 use std::sync::{Arc, Mutex};
-use std::thread;
 
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot::{channel, Receiver};
-use futures::executor::block_on;
 use futures::future::join_all;
 
 use futures::{select, FutureExt};
@@ -378,14 +376,13 @@ impl Raft {
 
         self.log.push(Log { entry: buf, term });
 
+        let client = self.peers[self.me].clone();
         let clone = self.clone();
 
         // Your code here (2B).
-        thread::spawn(move || {
-            block_on(async move {
-                let rx = clone.send_append_entries_to_all();
-                let _ = rx.await;
-            });
+        client.spawn(async move {
+            let rx = clone.send_append_entries_to_all();
+            let _ = rx.await;
         });
 
         Ok((index, term))
