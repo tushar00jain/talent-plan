@@ -49,28 +49,20 @@ impl Node {
 
             Delay::new(Duration::from_millis(20)).await;
 
-            let term = { clone.lock().unwrap().state.term() };
-
             let fut_replies = (0..peers.len())
                 .into_iter()
                 .filter(|&i| i != candidate_id as usize)
                 .map(|i| {
                     let guard = clone.lock().unwrap();
 
-                    let args = AppendEntriesArgs{
-                        term,
-                        leader_id: candidate_id,
-                        leader_commit: guard.commit_index,
-                        entries: guard.log.to_vec(),
-                        ..Default::default()
-                    };
+                    let args = guard.get_append_entries_args(i);
 
                     (i, guard.send_append_entries(i, args))
                 })
                 .map(|(i, rx)| async move {
                     select! {
                         r = rx.fuse() => (i, r.unwrap().unwrap_or_default()),
-                        _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default(),
+                        _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => (i, Default::default()),
                     }
                 })
                 .collect::<Vec<_>>();
@@ -92,6 +84,11 @@ impl Node {
             for (server, reply) in replies {
                 if reply.success {
                     guard.match_index[server] = guard.log.len() as u64;
+                    guard.next_index[server] = guard.log.len() as u64 + 1;
+                }
+
+                if reply.conflict {
+                    guard.next_index[server] -= 1;
                 }
             }
 
@@ -191,7 +188,7 @@ impl Node {
 
             if votes_count >= peers.len() / 2 + 1 {
                 state.is_leader = true;
-                guard.next_index = vec![0; peers.len()];
+                guard.next_index = vec![guard.log.len() as u64 + 1; peers.len()];
                 guard.match_index = vec![0; peers.len()];
                 return;
             }
@@ -370,6 +367,7 @@ impl RaftService for Node {
             return Ok(AppendEntriesReply {
                 term: state.term,
                 success: false,
+                ..Default::default()
             });
         }
 
@@ -388,21 +386,22 @@ impl RaftService for Node {
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,
+                conflict: true,
             });
         }
 
-        if !args.entries.is_empty() {
-            for i in 0..args.entries.len() {
-                let log = args.entries.get(i).unwrap();
+        if prev_log.is_none() && args.prev_log_index > guard.log.len() as u64 {
+            return Ok(AppendEntriesReply {
+                term: args.term,
+                success: false,
+                conflict: true,
+            });
+        }
 
-                if guard.log.get(i).is_none() {
-                    guard.log.push(log.clone());
-                }
+        guard.log = guard.log[..args.prev_log_index as usize].to_vec();
 
-                if guard.log.get(i).unwrap().term != log.term {
-                    guard.log = guard.log[..i].to_vec();
-                }
-            }
+        for entry in &args.entries {
+            guard.log.push(entry.clone());
         }
 
         if args.leader_commit > guard.commit_index {
@@ -425,6 +424,7 @@ impl RaftService for Node {
         Ok(AppendEntriesReply {
             term: args.term,
             success: true,
+            ..Default::default()
         })
     }
 }

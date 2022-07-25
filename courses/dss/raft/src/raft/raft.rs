@@ -199,19 +199,48 @@ impl Raft {
         rx
     }
 
+    pub fn get_append_entries_args(&self, server: usize) -> AppendEntriesArgs {
+        let prev_log_index = self.next_index[server] - 1;
+
+        let prev_log_term = match prev_log_index {
+            0 => 0,
+            _ => self.log.get(prev_log_index as usize - 1).unwrap().term,
+        };
+
+        let mut entries = Vec::default();
+
+        if self.log.len() >= self.next_index[server] as usize {
+            entries = self.log[(self.next_index[server] as usize - 1)..].to_vec();
+        }
+
+        AppendEntriesArgs {
+            term: self.state.term(),
+            leader_id: self.me as u64,
+            leader_commit: self.commit_index,
+            entries,
+            prev_log_index,
+            prev_log_term,
+        }
+    }
+
     pub fn commit(&mut self) {
         let range = (self.commit_index + 1)..=self.log.len() as u64;
-        let n = range.fold(self.commit_index, |acc1, i| {
-            let count = self.match_index.iter().fold(0, |acc2, &j| {
-                if j >= i {
-                    return acc2 + 1;
-                }
+        let n = range.fold(self.commit_index, |acc1, commit_index| {
+            let count = (0..self.peers.len())
+                .into_iter()
+                .filter(|&server| server != self.me as usize)
+                .fold(1, |acc2, server| {
+                    let match_index = self.match_index[server];
 
-                acc2
-            });
+                    if match_index >= commit_index {
+                        return acc2 + 1;
+                    }
+
+                    acc2
+                });
 
             if count >= self.peers.len() / 2 + 1 {
-                return i;
+                return commit_index;
             }
 
             acc1
@@ -225,6 +254,7 @@ impl Raft {
                 });
 
                 self.commit_index += 1;
+                self.last_applied += 1;
             }
         }
     }
@@ -245,15 +275,18 @@ impl Raft {
         labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
 
         self.log.push(Log { entry: buf, term });
-        self.match_index[self.me] = self.log.len() as u64;
 
-        let args = AppendEntriesArgs {
-            term,
-            leader_id: self.me as u64,
-            leader_commit: self.commit_index,
-            entries: self.log.to_vec(),
-            ..Default::default()
-        };
+        let args = self.peers
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                if i == self.me {
+                    return Default::default()
+                }
+
+                self.get_append_entries_args(i)
+            })
+            .collect::<Vec<_>>();
 
         let clone = self.clone();
 
@@ -263,7 +296,7 @@ impl Raft {
                 .into_iter()
                 .filter(|&i| i != clone.me as usize)
                 .map(|i| {
-                    clone.send_append_entries(i, args.clone())
+                    clone.send_append_entries(i, args[i].clone())
                 })
                 .map(|rx| async move {
                     select! {

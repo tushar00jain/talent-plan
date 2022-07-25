@@ -35,4 +35,5 @@ message AppendEntriesArgs {
 message AppendEntriesReply {
     uint64 term = 1;
     bool success = 2;
+    bool conflict = 3;
 }
