@@ -131,8 +131,6 @@ impl Node {
         let delay = rand::thread_rng().gen_range(50, 100);
 
         loop {
-            Delay::new(Duration::from_millis(ELECTION_TIMEOUT + delay)).await;
-
             let term = {
                 let mut guard = clone.lock().unwrap();
 
@@ -200,6 +198,8 @@ impl Node {
                 guard.match_index = vec![0; peers.len()];
                 return;
             }
+
+            Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT + delay)).await;
         }
     }
 
