@@ -45,6 +45,8 @@ impl Node {
         let candidate_id = { clone.lock().unwrap().me as u64 };
         let peers = { clone.lock().unwrap().peers.clone() };
 
+        debug!("{} : start_leader_loop()", candidate_id);
+
         loop {
             let fut_replies = (0..peers.len())
                 .into_iter()
@@ -96,6 +98,7 @@ impl Node {
 
             guard.commit();
 
+            drop(guard);
             Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT)).await;
         }
     }
@@ -194,6 +197,7 @@ impl Node {
                 return;
             }
 
+            drop(guard);
             Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT + delay)).await;
         }
     }
