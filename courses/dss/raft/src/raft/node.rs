@@ -4,9 +4,6 @@ use std::cmp::{max, min};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use futures::future::join_all;
-
-use futures::{select, FutureExt};
 use futures_timer::Delay;
 use std::time::{Duration, Instant};
 
@@ -43,30 +40,13 @@ impl Node {
         let clone = &self.raft;
 
         let candidate_id = { clone.lock().unwrap().me as u64 };
-        let peers = { clone.lock().unwrap().peers.clone() };
 
         debug!("{} : start_leader_loop()", candidate_id);
 
         loop {
-            let fut_replies = (0..peers.len())
-                .into_iter()
-                .filter(|&i| i != candidate_id as usize)
-                .map(|i| {
-                    let guard = clone.lock().unwrap();
+            let rx = clone.lock().unwrap().send_append_entries_to_all();
 
-                    let args = guard.get_append_entries_args(i);
-
-                    (i, guard.send_append_entries(i, args))
-                })
-                .map(|(i, rx)| async move {
-                    select! {
-                        r = rx.fuse() => (i, r.unwrap().unwrap_or_default()),
-                        _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => (i, Default::default()),
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let replies = join_all(fut_replies).await;
+            let replies = rx.await.unwrap();
 
             let max_term = replies.iter().fold(0, |acc, (_, reply)| max(acc, reply.term));
 
@@ -134,40 +114,9 @@ impl Node {
         debug!("{} start_candidate_loop()", candidate_id);
 
         loop {
-            let term = {
-                let mut guard = clone.lock().unwrap();
+            let rx = clone.lock().unwrap().send_request_vote_to_all();
 
-                guard.state.term += 1;
-                guard.voted_for = Some(candidate_id);
-                guard.state.term
-            };
-
-            let fut_votes = (0..peers.len())
-                .into_iter()
-                .filter(|&i| i != candidate_id as usize)
-                .map(|i| {
-                    let guard = clone.lock().unwrap();
-                    
-                    let last_log_term = guard.log.last().unwrap_or(&Log{..Default::default()}).term;
-
-                    let args = RequestVoteArgs {
-                        term,
-                        candidate_id,
-                        last_log_index: guard.log.len() as u64,
-                        last_log_term,
-                    };
-
-                    guard.send_request_vote(i, args)
-                })
-                .map(|rx| async move {
-                    select! {
-                        r = rx.fuse() => r.unwrap().unwrap_or_default(),
-                        _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default()
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let votes = join_all(fut_votes).await;
+            let votes = rx.await.unwrap();
 
             let votes_count = votes.iter().fold(1, |acc, reply| {
                 if reply.vote_granted {

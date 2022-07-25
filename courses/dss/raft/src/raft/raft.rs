@@ -211,6 +211,79 @@ impl Raft {
         rx
     }
 
+    pub fn send_request_vote_to_all(
+        &mut self,
+    ) -> Receiver<Vec<RequestVoteReply>> {
+        // might be guarded when called
+        self.state.term += 1;
+        self.voted_for = Some(self.me as u64);
+
+        let client = self.peers[self.me].clone();
+
+        let (tx, rx) = channel();
+
+        let fut_replies = self.peers
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != self.me)
+        .map(|(i, _)| {
+            let last_log_term = self.log.last().unwrap_or(&Log{..Default::default()}).term;
+
+            let args = RequestVoteArgs {
+                term: self.state.term(),
+                candidate_id: self.me as u64,
+                last_log_index: self.log.len() as u64,
+                last_log_term,
+            };
+
+            self.send_request_vote(i, args)
+        })
+        .map(|rx| async move {
+            select! {
+                r = rx.fuse() => r.unwrap().unwrap_or_default(),
+                _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default()
+            }
+        })
+        .collect::<Vec<_>>();
+
+        client.spawn(async move {
+            let replies = join_all(fut_replies).await;
+            let _ = tx.send(replies);
+        });
+        rx
+    }
+
+    pub fn send_append_entries_to_all(
+        &self,
+    ) -> Receiver<Vec<(usize, AppendEntriesReply)>> {
+        // might be guarded when called
+        let client = self.peers[self.me].clone();
+
+        let (tx, rx) = channel();
+
+        let fut_replies = self.peers
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != self.me as usize)
+            .map(|(i, _)| {
+                let args = self.get_append_entries_args(i);
+                (i, self.send_append_entries(i, args))
+            })
+            .map(|(i, rx)| async move {
+                select! {
+                    r = rx.fuse() => (i, r.unwrap().unwrap_or_default()),
+                    _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => (i, Default::default()),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        client.spawn(async move {
+            let replies = join_all(fut_replies).await;
+            let _ = tx.send(replies);
+        });
+        rx
+    }
+
     pub fn get_append_entries_args(&self, server: usize) -> AppendEntriesArgs {
         let prev_log_index = self.next_index[server] - 1;
 
@@ -305,38 +378,13 @@ impl Raft {
 
         self.log.push(Log { entry: buf, term });
 
-        let args = self.peers
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                if i == self.me {
-                    return Default::default()
-                }
-
-                self.get_append_entries_args(i)
-            })
-            .collect::<Vec<_>>();
-
         let clone = self.clone();
 
         // Your code here (2B).
         thread::spawn(move || {
             block_on(async move {
-                let fut_replies = (0..clone.peers.len())
-                    .into_iter()
-                    .filter(|&i| i != clone.me as usize)
-                    .map(|i| {
-                        clone.send_append_entries(i, args[i].clone())
-                    })
-                    .map(|rx| async move {
-                        select! {
-                            r = rx.fuse() => r.unwrap().unwrap_or_default(),
-                            _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default(),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
-                join_all(fut_replies).await;
+                let rx = clone.send_append_entries_to_all();
+                let _ = rx.await;
             });
         });
 
