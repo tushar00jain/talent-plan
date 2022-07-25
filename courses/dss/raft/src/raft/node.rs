@@ -46,12 +46,6 @@ impl Node {
         let peers = { clone.lock().unwrap().peers.clone() };
 
         loop {
-            let is_leader = { clone.lock().unwrap().state.is_leader() };
-
-            if !is_leader {
-                return;
-            }
-
             let fut_replies = (0..peers.len())
                 .into_iter()
                 .filter(|&i| i != candidate_id as usize)
@@ -99,6 +93,10 @@ impl Node {
 
             guard.commit();
 
+            if !guard.state.is_leader() {
+                return;
+            }
+
             Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT)).await;
         }
     }
@@ -128,7 +126,7 @@ impl Node {
         let candidate_id = { clone.lock().unwrap().me as u64 };
         let peers = { clone.lock().unwrap().peers.clone() };
 
-        let delay = rand::thread_rng().gen_range(50, 100);
+        let delay = rand::thread_rng().gen_range(25, 50);
 
         loop {
             let term = {
@@ -215,7 +213,12 @@ impl Node {
         thread::spawn(move || {
             block_on(async move {
                 loop {
-                    clone.start_leader_loop().await;
+                    let is_leader = { clone.is_leader() };
+
+                    if is_leader {
+                        clone.start_leader_loop().await;
+                    }
+
                     clone.start_follower_loop().await;
                     clone.start_candidate_loop().await;
                 }
