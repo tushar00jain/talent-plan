@@ -52,8 +52,6 @@ impl Node {
                 return;
             }
 
-            Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT)).await;
-
             let fut_replies = (0..peers.len())
                 .into_iter()
                 .filter(|&i| i != candidate_id as usize)
@@ -100,6 +98,8 @@ impl Node {
             }
 
             guard.commit();
+
+            Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT)).await;
         }
     }
 
