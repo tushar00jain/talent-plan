@@ -1,6 +1,8 @@
+use futures::executor::block_on;
 use rand::Rng;
 use std::cmp::{max, min};
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use futures::future::join_all;
 
@@ -12,6 +14,9 @@ use super::errors::*;
 use crate::proto::raftpb::*;
 
 use super::raft::*;
+
+pub const HEARTBEAT_TIMEOUT: u64 = 25;
+pub const ELECTION_TIMEOUT: u64 = 100;
 
 // Choose concurrency paradigm.
 //
@@ -47,7 +52,7 @@ impl Node {
                 return;
             }
 
-            Delay::new(Duration::from_millis(20)).await;
+            Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT)).await;
 
             let fut_replies = (0..peers.len())
                 .into_iter()
@@ -82,6 +87,8 @@ impl Node {
             }
 
             for (server, reply) in replies {
+                debug!("{} -> append_entries()\n{:?}\n", server, reply);
+
                 if reply.success {
                     guard.match_index[server] = guard.log.len() as u64;
                     guard.next_index[server] = guard.log.len() as u64 + 1;
@@ -97,6 +104,7 @@ impl Node {
     }
 
     async fn start_follower_loop(&self) {
+        debug!("{} : start_follower_loop()", {self.raft.lock().unwrap().me});
         let clone = &self.raft;
 
         let delay = rand::thread_rng().gen_range(50, 100);
@@ -104,7 +112,7 @@ impl Node {
         loop {
             let deadline = Instant::now();
 
-            Delay::new(Duration::from_millis(200 + delay)).await;
+            Delay::new(Duration::from_millis(ELECTION_TIMEOUT + delay)).await;
 
             let guard = clone.lock().unwrap();
 
@@ -120,10 +128,10 @@ impl Node {
         let candidate_id = { clone.lock().unwrap().me as u64 };
         let peers = { clone.lock().unwrap().peers.clone() };
 
-        let delay = rand::thread_rng().gen_range(0, 5);
+        let delay = rand::thread_rng().gen_range(50, 100);
 
         loop {
-            Delay::new(Duration::from_millis(5 + delay)).await;
+            Delay::new(Duration::from_millis(ELECTION_TIMEOUT + delay)).await;
 
             let term = {
                 let mut guard = clone.lock().unwrap();
@@ -198,19 +206,20 @@ impl Node {
     /// Create a new raft service.
     pub fn new(raft: Raft) -> Node {
         // Your code here.
-        let client = raft.peers[raft.me].clone();
         let node = Node {
             raft: Arc::new(Mutex::new(raft)),
         };
 
         let clone = node.clone();
 
-        client.spawn(async move {
-            loop {
-                clone.start_leader_loop().await;
-                clone.start_follower_loop().await;
-                clone.start_candidate_loop().await;
-            }
+        thread::spawn(move || {
+            block_on(async move {
+                loop {
+                    clone.start_leader_loop().await;
+                    clone.start_follower_loop().await;
+                    clone.start_candidate_loop().await;
+                }
+            });
         });
 
         node
@@ -361,6 +370,7 @@ impl RaftService for Node {
 
     async fn append_entries(&self, args: AppendEntriesArgs) -> labrpc::Result<AppendEntriesReply> {
         let mut guard = self.raft.lock().unwrap();
+        debug!("{} <- append_entries()\n{:?}\n{:?}\n", guard.me, args, guard.log);
         let state = &mut guard.state;
 
         if args.term < state.term {
@@ -377,6 +387,8 @@ impl RaftService for Node {
             guard.voted_for = None;
         }
 
+        guard.last_heartbeat = Some(Instant::now());
+
         let prev_log = match args.prev_log_index {
             0 => None,
             _ => guard.log.get(args.prev_log_index as usize - 1),
@@ -386,7 +398,7 @@ impl RaftService for Node {
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,
-                conflict: true,
+                conflict: false,
             });
         }
 
@@ -418,8 +430,6 @@ impl RaftService for Node {
                 guard.last_applied += 1;
             }
         }
-
-        guard.last_heartbeat = Some(Instant::now());
 
         Ok(AppendEntriesReply {
             term: args.term,

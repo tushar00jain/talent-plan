@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot::{channel, Receiver};
+use futures::executor::block_on;
 use futures::future::join_all;
 
 use futures::{select, FutureExt};
@@ -291,22 +293,24 @@ impl Raft {
         let clone = self.clone();
 
         // Your code here (2B).
-        self.peers[self.me].spawn(async move {
-            let fut_replies = (0..clone.peers.len())
-                .into_iter()
-                .filter(|&i| i != clone.me as usize)
-                .map(|i| {
-                    clone.send_append_entries(i, args[i].clone())
-                })
-                .map(|rx| async move {
-                    select! {
-                        r = rx.fuse() => r.unwrap().unwrap_or_default(),
-                        _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default(),
-                    }
-                })
-                .collect::<Vec<_>>();
+        thread::spawn(move || {
+            block_on(async move {
+                let fut_replies = (0..clone.peers.len())
+                    .into_iter()
+                    .filter(|&i| i != clone.me as usize)
+                    .map(|i| {
+                        clone.send_append_entries(i, args[i].clone())
+                    })
+                    .map(|rx| async move {
+                        select! {
+                            r = rx.fuse() => r.unwrap().unwrap_or_default(),
+                            _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
 
-            join_all(fut_replies).await;
+                join_all(fut_replies).await;
+            });
         });
 
         Ok((index, term))
