@@ -395,7 +395,7 @@ impl RaftService for Node {
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,
-                conflict: false,
+                conflict: true,
             });
         }
 
@@ -403,7 +403,7 @@ impl RaftService for Node {
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,
-                conflict: false,
+                conflict: true,
             });
         }
 
