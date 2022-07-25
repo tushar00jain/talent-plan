@@ -73,8 +73,11 @@ impl Node {
 
             if max_term > state.term {
                 state.term = max_term;
-                state.is_leader = false;
-                guard.voted_for = None;
+                guard.to_follower();
+                return;
+            }
+
+            if !guard.state.is_leader() {
                 return;
             }
 
@@ -93,16 +96,12 @@ impl Node {
 
             guard.commit();
 
-            if !guard.state.is_leader() {
-                return;
-            }
-
             Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT)).await;
         }
     }
 
     async fn start_follower_loop(&self) {
-        debug!("{} : start_follower_loop()", {self.raft.lock().unwrap().me});
+        debug!("{} : start_follower_loop()", { self.raft.lock().unwrap().me });
         let clone = &self.raft;
 
         let delay = rand::thread_rng().gen_range(50, 100);
@@ -112,9 +111,10 @@ impl Node {
 
             Delay::new(Duration::from_millis(ELECTION_TIMEOUT + delay)).await;
 
-            let guard = clone.lock().unwrap();
+            let mut guard = clone.lock().unwrap();
 
             if guard.last_heartbeat.is_none() || guard.last_heartbeat.unwrap() < deadline {
+                guard.state.role = Role::Candidate;
                 return;
             }
         }
@@ -127,6 +127,8 @@ impl Node {
         let peers = { clone.lock().unwrap().peers.clone() };
 
         let delay = rand::thread_rng().gen_range(25, 50);
+
+        debug!("{} start_candidate_loop()", candidate_id);
 
         loop {
             let term = {
@@ -164,24 +166,6 @@ impl Node {
 
             let votes = join_all(fut_votes).await;
 
-            let max_term = votes.iter().fold(0, |acc, reply| max(acc, reply.term));
-
-            let mut guard = clone.lock().unwrap();
-            let state = &mut guard.state;
-
-            if max_term > state.term {
-                state.term = max_term;
-                state.is_leader = false;
-                guard.voted_for = None;
-                return;
-            }
-
-            // state got corrupted while requesting vote
-            // i.e. someone else requested vote
-            if state.term > term {
-                return;
-            }
-
             let votes_count = votes.iter().fold(1, |acc, reply| {
                 if reply.vote_granted {
                     return acc + 1;
@@ -190,10 +174,23 @@ impl Node {
                 acc
             });
 
+            let max_term = votes.iter().fold(0, |acc, reply| max(acc, reply.term));
+
+            let mut guard = clone.lock().unwrap();
+            let state = &mut guard.state;
+
+            if state.role != Role::Candidate {
+                return;
+            }
+
+            if max_term > state.term {
+                state.term = max_term;
+                guard.to_follower();
+                return;
+            }
+
             if votes_count >= peers.len() / 2 + 1 {
-                state.is_leader = true;
-                guard.next_index = vec![guard.log.len() as u64 + 1; peers.len()];
-                guard.match_index = vec![0; peers.len()];
+                guard.to_leader();
                 return;
             }
 
@@ -213,14 +210,13 @@ impl Node {
         thread::spawn(move || {
             block_on(async move {
                 loop {
-                    let is_leader = { clone.is_leader() };
+                    let role = { clone.raft.lock().unwrap().state.role };
 
-                    if is_leader {
-                        clone.start_leader_loop().await;
+                    match role {
+                        Role::Leader => clone.start_leader_loop().await,
+                        Role::Follower => clone.start_follower_loop().await,
+                        Role::Candidate => clone.start_candidate_loop().await,
                     }
-
-                    clone.start_follower_loop().await;
-                    clone.start_candidate_loop().await;
                 }
             });
         });
@@ -337,8 +333,7 @@ impl RaftService for Node {
 
         if args.term > state.term {
             state.term = args.term;
-            state.is_leader = false;
-            guard.voted_for = None;
+            guard.to_follower();
         }
 
         let last_log_term = guard
@@ -386,8 +381,7 @@ impl RaftService for Node {
 
         if args.term > state.term {
             state.term = args.term;
-            state.is_leader = false;
-            guard.voted_for = None;
+            guard.to_follower();
         }
 
         guard.last_heartbeat = Some(Instant::now());
@@ -409,7 +403,7 @@ impl RaftService for Node {
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,
-                conflict: true,
+                conflict: false,
             });
         }
 

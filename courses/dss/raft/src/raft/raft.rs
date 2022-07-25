@@ -16,6 +16,14 @@ use crate::proto::raftpb::*;
 
 pub const RPC_TIMEOUT: u64 = 10;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Role {
+    #[default]
+    Follower,
+    Candidate,
+    Leader,
+}
+
 /// As each Raft peer becomes aware that successive log entries are committed,
 /// the peer should send an `ApplyMsg` to the service (or tester) on the same
 /// server, via the `apply_ch` passed to `Raft::new`.
@@ -43,6 +51,8 @@ pub enum ApplyMsg {
 pub struct State {
     pub term: u64,
     pub is_leader: bool,
+
+    pub role: Role,
 }
 
 impl State {
@@ -223,6 +233,23 @@ impl Raft {
             prev_log_index,
             prev_log_term,
         }
+    }
+
+    pub fn to_leader(&mut self) {
+        let state = &mut self.state;
+
+        state.is_leader = true;
+        state.role = Role::Leader;
+        self.next_index = vec![self.log.len() as u64 + 1; self.peers.len()];
+        self.match_index = vec![0; self.peers.len()];
+    }
+
+    pub fn to_follower(&mut self) {
+        let state = &mut self.state;
+
+        state.is_leader = false;
+        state.role = Role::Follower;
+        self.voted_for = None;
     }
 
     pub fn commit(&mut self) {
