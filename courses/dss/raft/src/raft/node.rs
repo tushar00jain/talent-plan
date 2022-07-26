@@ -44,7 +44,10 @@ impl Node {
         debug!("{} : start_leader_loop()", candidate_id);
 
         loop {
-            let rx = clone.lock().unwrap().send_append_entries_to_all();
+            let guard = clone.lock().unwrap();
+            let len = guard.log.len();
+            let rx = guard.send_append_entries_to_all();
+            drop(guard);
 
             let replies = rx.await.unwrap();
 
@@ -67,8 +70,8 @@ impl Node {
                 debug!("{} -> append_entries()\n{:?}\n", server, reply);
 
                 if reply.success {
-                    guard.match_index[server] = guard.log.len() as u64;
-                    guard.next_index[server] = guard.log.len() as u64 + 1;
+                    guard.match_index[server] = len as u64;
+                    guard.next_index[server] = len as u64 + 1;
                 }
 
                 if reply.conflict {
@@ -107,7 +110,7 @@ impl Node {
         let clone = &self.raft;
 
         let candidate_id = { clone.lock().unwrap().me as u64 };
-        let peers = { clone.lock().unwrap().peers.clone() };
+        let majority = { clone.lock().unwrap().peers.len() / 2 + 1 };
 
         let delay = rand::thread_rng().gen_range(25, 50);
 
@@ -141,13 +144,13 @@ impl Node {
                 return;
             }
 
-            if votes_count >= peers.len() / 2 + 1 {
+            if votes_count >= majority {
                 guard.to_leader();
                 return;
             }
 
             drop(guard);
-            Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT + delay)).await;
+            Delay::new(Duration::from_millis(ELECTION_TIMEOUT + delay)).await;
         }
     }
 
@@ -304,6 +307,8 @@ impl RaftService for Node {
 
         if can_vote && is_up_to_date {
             guard.voted_for = Some(args.candidate_id);
+
+            guard.last_heartbeat = Some(Instant::now());
 
             return Ok(RequestVoteReply {
                 term: args.term,

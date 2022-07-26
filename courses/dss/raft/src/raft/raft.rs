@@ -377,11 +377,11 @@ impl Raft {
         self.log.push(Log { entry: buf, term });
 
         let client = self.peers[self.me].clone();
-        let clone = self.clone();
+
+        let rx = self.send_append_entries_to_all();
 
         // Your code here (2B).
         client.spawn(async move {
-            let rx = clone.send_append_entries_to_all();
             let _ = rx.await;
         });
 
