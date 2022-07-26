@@ -75,7 +75,7 @@ impl Node {
                 }
 
                 if reply.conflict {
-                    guard.next_index[server] -= 1;
+                    guard.next_index[server] = reply.conflict_index;
                 }
             }
 
@@ -347,6 +347,7 @@ impl RaftService for Node {
                 term: args.term,
                 success: false,
                 conflict: true,
+                conflict_index: guard.log.len() as u64 + 1,
             });
         }
 
@@ -356,10 +357,20 @@ impl RaftService for Node {
         };
 
         if prev_log.is_some() && prev_log.unwrap().term != args.prev_log_term {
+            let prev_log_term = prev_log.unwrap().term;
+
+            let conflict_index = (0..args.prev_log_index as usize)
+            .rev()
+            .find(|&i| guard.log.get(i).unwrap().term != prev_log_term);
+
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,
                 conflict: true,
+                conflict_index: match conflict_index {
+                    None => 1,
+                    Some(i) => i as u64 + 1 + 1,
+                }
             });
         }
 
