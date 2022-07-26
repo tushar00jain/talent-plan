@@ -305,8 +305,6 @@ impl RaftService for Node {
         if can_vote && is_up_to_date {
             guard.voted_for = Some(args.candidate_id);
 
-            guard.last_heartbeat = Some(Instant::now());
-
             return Ok(RequestVoteReply {
                 term: args.term,
                 vote_granted: true,
