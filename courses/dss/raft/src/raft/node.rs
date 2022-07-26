@@ -12,8 +12,8 @@ use crate::proto::raftpb::*;
 
 use super::raft::*;
 
-pub const HEARTBEAT_TIMEOUT: u64 = 25;
-pub const ELECTION_TIMEOUT: u64 = 100;
+pub const HEARTBEAT_TIMEOUT: u64 = 50;
+pub const ELECTION_TIMEOUT: u64 = 200;
 
 // Choose concurrency paradigm.
 //
