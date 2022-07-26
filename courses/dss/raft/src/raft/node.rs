@@ -337,12 +337,7 @@ impl RaftService for Node {
 
         guard.last_heartbeat = Some(Instant::now());
 
-        let prev_log = match args.prev_log_index {
-            0 => None,
-            _ => guard.log.get(args.prev_log_index as usize - 1),
-        };
-
-        if prev_log.is_some() && prev_log.unwrap().term != args.prev_log_term {
+        if args.prev_log_index > guard.log.len() as u64 {
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,
@@ -350,7 +345,12 @@ impl RaftService for Node {
             });
         }
 
-        if prev_log.is_none() && args.prev_log_index > guard.log.len() as u64 {
+        let prev_log = match args.prev_log_index {
+            0 => None,
+            _ => guard.log.get(args.prev_log_index as usize - 1),
+        };
+
+        if prev_log.is_some() && prev_log.unwrap().term != args.prev_log_term {
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,
