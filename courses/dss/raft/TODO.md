@@ -1,0 +1,3 @@
+- election timeout: use event handling
+- guards: make sure mutexes are not locked when waiting for requests
+- refactor
