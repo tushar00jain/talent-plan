@@ -341,7 +341,7 @@ impl RaftService for Node {
             });
         }
 
-        guard.log.entries = guard.log.entries[..args.prev_log_index as usize].to_vec();
+        guard.log.entries.truncate(args.prev_log_index as usize);
 
         for entry in &args.entries {
             guard.log.entries.push(entry.clone());

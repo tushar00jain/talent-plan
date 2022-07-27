@@ -281,11 +281,10 @@ impl Raft {
     pub fn get_append_entries_args(&self, server: usize) -> AppendEntriesArgs {
         let prev_log_index = self.log.next_index[server] - 1;
 
-        let mut entries = Vec::default();
-
-        if self.log.last_log_index() >= self.log.next_index[server] {
-            entries = self.log.entries[prev_log_index as usize..].to_vec();
-        }
+        let entries = match self.log.last_log_index() {
+            index if prev_log_index < index => self.log.entries[prev_log_index as usize..].to_vec(),
+            _ => Default::default(),
+        };
 
         AppendEntriesArgs {
             term: self.state.term(),
