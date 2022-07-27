@@ -55,26 +55,30 @@ impl Node {
             let mut guard = clone.lock().unwrap();
             let state = &mut guard.state;
 
+            if !state.is_leader() {
+                return;
+            }
+
             if max_term > state.term {
                 state.term = max_term;
                 guard.to_follower();
                 return;
             }
 
-            if !guard.state.is_leader() {
-                return;
-            }
+            replies
+                .iter()
+                .filter(|(_, reply)| reply.success)
+                .for_each(|(server, _)| {
+                    guard.log.match_index[*server] = last_index;
+                    guard.log.next_index[*server] = last_index + 1;
+                });
 
-            for (server, reply) in replies {
-                if reply.success {
-                    guard.log.match_index[server] = last_index;
-                    guard.log.next_index[server] = last_index + 1;
-                }
-
-                if reply.conflict {
-                    guard.log.next_index[server] = reply.conflict_index;
-                }
-            }
+            replies
+                .iter()
+                .filter(|(_, reply)| reply.conflict)
+                .for_each(|(server, reply)| {
+                    guard.log.next_index[*server] = reply.conflict_index;
+                });
 
             guard.commit();
 
@@ -114,14 +118,14 @@ impl Node {
             let rx = guard.send_request_vote_to_all();
             drop(guard);
 
-            let votes = rx.await.unwrap();
+            let replies = rx.await.unwrap();
 
-            let votes_count = 1 + votes
+            let votes_count = 1 + replies
                 .iter()
                 .filter(|reply| reply.vote_granted)
                 .count();
 
-            let max_term = votes
+            let max_term = replies
                 .iter()
                 .map(|reply| reply.term)
                 .max()
@@ -343,10 +347,9 @@ impl RaftService for Node {
         guard.log.entries.truncate(args.prev_log_index as usize);
         guard.log.entries.extend(args.entries);
 
-        if args.leader_commit > guard.log.commit_index {
-            let next_commit_index = guard.log.next_commit_index_follower(args.leader_commit);
-            let apply_ch = guard.apply_ch.clone();
+        let apply_ch = guard.apply_ch.clone();
 
+        if let Some(next_commit_index) = guard.log.next_commit_index_follower(args.leader_commit) {
             guard.log.commit(
                 next_commit_index,
                 |index, data| {

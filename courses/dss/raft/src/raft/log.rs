@@ -56,7 +56,7 @@ impl Log {
                     term if term == prev_log_term => None,
                     term => (0..prev_log_index)
                         .rev()
-                        .find(|&i| self.get(i).term != term)
+                        .find(|&i| self.get(i).term != term),
                 }
             }
         }
@@ -76,9 +76,11 @@ impl Log {
             })
     }
 
-    pub fn next_commit_index_follower(&self, leader_commit: u64) -> u64 {
-        self.last_log_index()
-            .min(leader_commit)
+    pub fn next_commit_index_follower(&self, leader_commit_index: u64) -> Option<u64> {
+        match leader_commit_index {
+            index if index > self.commit_index => Some(self.last_log_index().min(index)),
+            _ => None,
+        }
     }
 
     pub fn commit<F>(
