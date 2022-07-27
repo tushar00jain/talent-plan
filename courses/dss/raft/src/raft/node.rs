@@ -41,7 +41,7 @@ impl Node {
 
         loop {
             let guard = clone.lock().unwrap();
-            let len = guard.log.entries.len();
+            let last_index = guard.log.last_log_index();
             let rx = guard.send_append_entries_to_all();
             drop(guard);
 
@@ -68,8 +68,8 @@ impl Node {
 
             for (server, reply) in replies {
                 if reply.success {
-                    guard.log.match_index[server] = len as u64;
-                    guard.log.next_index[server] = len as u64 + 1;
+                    guard.log.match_index[server] = last_index;
+                    guard.log.next_index[server] = last_index + 1;
                 }
 
                 if reply.conflict {
@@ -106,8 +106,6 @@ impl Node {
     async fn start_candidate_loop(&self) {
         let clone = &self.raft;
 
-        let majority = { clone.lock().unwrap().peers.len() / 2 + 1 };
-
         let delay = rand::thread_rng().gen_range(25, 50);
 
         loop {
@@ -143,7 +141,7 @@ impl Node {
                 return;
             }
 
-            if votes_count >= majority {
+            if votes_count >= guard.peers.len() / 2 + 1 {
                 guard.to_leader();
                 return;
             }

@@ -283,7 +283,7 @@ impl Raft {
 
         let mut entries = Vec::default();
 
-        if self.log.entries.len() >= self.log.next_index[server] as usize {
+        if self.log.last_log_index() >= self.log.next_index[server] {
             entries = self.log.entries[prev_log_index as usize..].to_vec();
         }
 
