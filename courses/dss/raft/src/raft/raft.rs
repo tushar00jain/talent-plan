@@ -315,22 +315,19 @@ impl Raft {
 
     pub fn commit(&mut self) {
         let n = (self.log.commit_index + 1..=self.log.last_log_index())
-            .fold(self.log.commit_index, |acc, commit_index| {
+            .rev()
+            .find(|&index| {
                 let count = 1 + (0..self.peers.len())
                     .into_iter()
                     .filter(|&server| server != self.me as usize)
-                    .filter(|&server| self.log.match_index[server] >= commit_index)
+                    .filter(|&server| self.log.match_index[server] >= index)
                     .count();
 
-                if count >= self.peers.len() / 2 + 1 {
-                    return commit_index;
-                }
-
-                acc
-        });
-
-        if n > self.log.commit_index && self.log.get(n).term == self.state.term {
-            for index in self.log.commit_index + 1..=n {
+                count >= self.peers.len() / 2 + 1
+            });
+        
+        if n.is_some() && self.log.get(n.unwrap()).term == self.state.term {
+            for index in self.log.commit_index + 1..=n.unwrap() {
                 let _ = self.apply_ch.unbounded_send(ApplyMsg::Command {
                     data: self.log.get(index).data.to_vec(),
                     index,
