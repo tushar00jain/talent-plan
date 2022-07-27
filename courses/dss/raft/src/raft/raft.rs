@@ -314,20 +314,22 @@ impl Raft {
     }
 
     pub fn commit(&mut self) {
-        if let Some(next_commit_index) = self.log.next_commit_index(self.me) {
+        let apply_ch = self.apply_ch.clone();
+
+        if let Some(next_commit_index) = self.log.next_commit_index_leader(self.me) {
             if self.log.get(next_commit_index).term != self.state.term {
                 return
             }
 
-            for index in self.log.commit_index + 1..=next_commit_index {
-                let _ = self.apply_ch.unbounded_send(ApplyMsg::Command {
-                    data: self.log.get(index).data.to_vec(),
-                    index,
-                });
-
-                self.log.commit_index += 1;
-                self.log.last_applied += 1;
-            }
+            self.log.commit(
+                next_commit_index,
+                |index, data| {
+                    let _ = apply_ch.unbounded_send(ApplyMsg::Command {
+                        data,
+                        index,
+                    });
+                }
+            );
         }
     }
 
@@ -344,17 +346,15 @@ impl Raft {
 
         let index = self.log.last_log_index() + 1;
         let term = self.state.term();
+        // Your code here (2B).
+        let client = self.peers[self.me].clone();
 
         self.log.entries.push(Entry {
             data: buf,
             term
         });
 
-        let client = self.peers[self.me].clone();
-
         let rx = self.send_append_entries_to_all();
-
-        // Your code here (2B).
         client.spawn(async move {
             let _ = rx.await;
         });

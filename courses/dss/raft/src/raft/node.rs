@@ -1,6 +1,5 @@
 use futures::executor::block_on;
 use rand::Rng;
-use std::cmp::min;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -342,24 +341,21 @@ impl RaftService for Node {
         }
 
         guard.log.entries.truncate(args.prev_log_index as usize);
-
-        for entry in &args.entries {
-            guard.log.entries.push(entry.clone());
-        }
+        guard.log.entries.extend(args.entries);
 
         if args.leader_commit > guard.log.commit_index {
-            guard.log.commit_index = min(args.leader_commit, guard.log.last_log_index());
-        }
+            let next_commit_index = guard.log.next_commit_index_follower(args.leader_commit);
+            let apply_ch = guard.apply_ch.clone();
 
-        if guard.log.commit_index > guard.log.last_applied {
-            for index in (guard.log.last_applied + 1)..=guard.log.commit_index {
-                let _ = guard.apply_ch.unbounded_send(ApplyMsg::Command {
-                    data: guard.log.get(index).data.to_vec(),
-                    index,
-                });
-
-                guard.log.last_applied += 1;
-            }
+            guard.log.commit(
+                next_commit_index,
+                |index, data| {
+                    let _ = apply_ch.unbounded_send(ApplyMsg::Command {
+                        data,
+                        index,
+                    });
+                }
+            );
         }
 
         Ok(AppendEntriesReply {
