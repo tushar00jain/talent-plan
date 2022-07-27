@@ -220,7 +220,7 @@ impl Raft {
 
         let (tx, rx) = channel();
 
-        let fut_replies = self.peers
+        let args = self.peers
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != self.me)
@@ -234,17 +234,26 @@ impl Raft {
                 last_log_term,
             };
 
-            self.send_request_vote(i, args)
-        })
-        .map(|rx| async move {
-            select! {
-                r = rx.fuse() => r.unwrap().unwrap_or_default(),
-                _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default()
-            }
+            (i, args)
         })
         .collect::<Vec<_>>();
 
+        let clone = self.clone();
+
         client.spawn(async move {
+            let fut_replies = args
+                .into_iter()
+                .map(|(i, args)| {
+                    clone.send_request_vote(i, args)
+                })
+                .map(|rx| async move {
+                    select! {
+                        r = rx.fuse() => r.unwrap().unwrap_or_default(),
+                        _ = Delay::new(Duration::from_millis(RPC_TIMEOUT)).fuse() => Default::default()
+                    }
+                })
+                .collect::<Vec<_>>();
+
             let replies = join_all(fut_replies).await;
             let _ = tx.send(replies);
         });
@@ -259,13 +268,22 @@ impl Raft {
 
         let (tx, rx) = channel();
 
-        let fut_replies = self.peers
+        let args = self.peers
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != self.me as usize)
             .map(|(i, _)| {
-                let args = self.get_append_entries_args(i);
-                (i, self.send_append_entries(i, args))
+                (i, self.get_append_entries_args(i))
+            })
+            .collect::<Vec<_>>();
+
+        let clone = self.clone();
+
+        client.spawn(async move {
+            let fut_replies = args
+            .into_iter()
+            .map(|(i, args)| {
+                (i, clone.send_append_entries(i, args))
             })
             .map(|(i, rx)| async move {
                 select! {
@@ -275,7 +293,6 @@ impl Raft {
             })
             .collect::<Vec<_>>();
 
-        client.spawn(async move {
             let replies = join_all(fut_replies).await;
             let _ = tx.send(replies);
         });
@@ -284,6 +301,10 @@ impl Raft {
 
     pub fn get_append_entries_args(&self, server: usize) -> AppendEntriesArgs {
         let prev_log_index = self.next_index[server] - 1;
+
+        if prev_log_index > self.log.len() as u64 {
+            warn!("{} -> {} get_append_entries_args() \nprev_log_index > self.log.len()", self.me, server);
+        }
 
         let prev_log_term = match prev_log_index {
             0 => 0,

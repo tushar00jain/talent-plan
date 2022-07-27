@@ -117,7 +117,9 @@ impl Node {
         debug!("{} start_candidate_loop()", candidate_id);
 
         loop {
-            let rx = clone.lock().unwrap().send_request_vote_to_all();
+            let mut guard = clone.lock().unwrap();
+            let rx = guard.send_request_vote_to_all();
+            drop(guard);
 
             let votes = rx.await.unwrap();
 
