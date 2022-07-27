@@ -103,15 +103,15 @@ impl Raft {
     ) -> Raft {
         let raft_state = persister.lock().unwrap().raft_state();
 
-        let len = peers.len();
+        let log = Log::new(vec![0; peers.len()], vec![0; peers.len()]);
 
         // Your initialization code here (2A, 2B, 2C).
         let mut rf = Raft {
+            log,
             peers,
             persister: Arc::new(persister),
             me,
             state: Default::default(),
-            log: Log::new(len),
             voted_for: Default::default(),
             last_heartbeat: Default::default(),
             apply_ch,
@@ -287,7 +287,7 @@ impl Raft {
     pub fn get_append_entries_args(&self, server: usize) -> AppendEntriesArgs {
         let prev_log_index = self.log.next_index[server] - 1;
 
-        let prev_log_term = self.log.get(prev_log_index as usize).term;
+        let prev_log_term = self.log.get(prev_log_index).term;
 
         let mut entries = Vec::default();
 
@@ -346,10 +346,10 @@ impl Raft {
                 acc1
         });
 
-        if n > self.log.commit_index && self.log.get(n as usize).term == self.state.term {
+        if n > self.log.commit_index && self.log.get(n).term == self.state.term {
             for index in self.log.commit_index + 1..=n {
                 let _ = self.apply_ch.unbounded_send(ApplyMsg::Command {
-                    data: self.log.get(index as usize).data.to_vec(),
+                    data: self.log.get(index).data.to_vec(),
                     index,
                 });
 

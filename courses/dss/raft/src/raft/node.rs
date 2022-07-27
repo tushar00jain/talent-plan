@@ -329,32 +329,12 @@ impl RaftService for Node {
 
         guard.last_heartbeat = Some(Instant::now());
 
-        if args.prev_log_index > guard.log.entries.len() as u64 {
+        if let Some(conflict_index) = guard.log.conflict_index(args.prev_log_index, args.prev_log_term) {
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,
                 conflict: true,
-                conflict_index: guard.log.entries.len() as u64 + 1,
-            });
-        }
-
-        let prev_log = guard.log.entries.get(args.prev_log_index as usize);
-
-        if prev_log.is_some() && prev_log.unwrap().term != args.prev_log_term {
-            let prev_log_term = prev_log.unwrap().term;
-
-            let conflict_index = (0..args.prev_log_index as usize)
-            .rev()
-            .find(|&i| guard.log.get(i + 1).term != prev_log_term);
-
-            return Ok(AppendEntriesReply {
-                term: args.term,
-                success: false,
-                conflict: true,
-                conflict_index: match conflict_index {
-                    None => 1,
-                    Some(i) => i as u64 + 1 + 1,
-                }
+                conflict_index: conflict_index + 1,
             });
         }
 
@@ -365,13 +345,13 @@ impl RaftService for Node {
         }
 
         if args.leader_commit > guard.log.commit_index {
-            guard.log.commit_index = min(args.leader_commit, guard.log.entries.len() as u64);
+            guard.log.commit_index = min(args.leader_commit, guard.log.last_log_index());
         }
 
         if guard.log.commit_index > guard.log.last_applied {
             for index in (guard.log.last_applied + 1)..=guard.log.commit_index {
                 let _ = guard.apply_ch.unbounded_send(ApplyMsg::Command {
-                    data: guard.log.get(index as usize).data.to_vec(),
+                    data: guard.log.get(index).data.to_vec(),
                     index,
                 });
 
