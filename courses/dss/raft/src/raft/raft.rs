@@ -201,12 +201,9 @@ impl Raft {
     }
 
     pub fn send_request_vote_to_all(
-        &mut self,
+        &self,
     ) -> Receiver<Vec<RequestVoteReply>> {
         // might be guarded when called
-        self.state.term += 1;
-        self.voted_for = Some(self.me as u64);
-
         let client = self.peers[self.me].clone();
 
         let (tx, rx) = channel();
@@ -215,18 +212,15 @@ impl Raft {
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != self.me)
-        .map(|(i, _)| {
-            let last_log_term = self.log.entries.last().unwrap_or(&Entry{..Default::default()}).term;
-
-            let args = RequestVoteArgs {
+        .map(|(i, _)| (
+            i, 
+            RequestVoteArgs {
                 term: self.state.term(),
                 candidate_id: self.me as u64,
                 last_log_index: self.log.entries.len() as u64,
-                last_log_term,
-            };
-
-            (i, args)
-        })
+                last_log_term: self.log.last_log_term() as u64,
+            }
+        ))
         .collect::<Vec<_>>();
 
         let clone = self.clone();
@@ -293,10 +287,7 @@ impl Raft {
     pub fn get_append_entries_args(&self, server: usize) -> AppendEntriesArgs {
         let prev_log_index = self.log.next_index[server] - 1;
 
-        let prev_log_term = match prev_log_index {
-            0 => 0,
-            _ => self.log.entries.get(prev_log_index as usize - 1).unwrap().term,
-        };
+        let prev_log_term = self.log.get(prev_log_index as usize).term;
 
         let mut entries = Vec::default();
 
@@ -355,10 +346,10 @@ impl Raft {
                 acc1
         });
 
-        if n > self.log.commit_index && self.log.entries.get(n as usize - 1).unwrap().term == self.state.term {
+        if n > self.log.commit_index && self.log.get(n as usize).term == self.state.term {
             for index in self.log.commit_index + 1..=n {
                 let _ = self.apply_ch.unbounded_send(ApplyMsg::Command {
-                    data: self.log.entries.get(index as usize - 1).unwrap().data.to_vec(),
+                    data: self.log.get(index as usize).data.to_vec(),
                     index,
                 });
 

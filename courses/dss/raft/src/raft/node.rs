@@ -108,6 +108,8 @@ impl Node {
 
         loop {
             let mut guard = clone.lock().unwrap();
+            guard.state.term += 1;
+            guard.voted_for = Some(guard.me as u64);
             let rx = guard.send_request_vote_to_all();
             drop(guard);
 
@@ -284,13 +286,7 @@ impl RaftService for Node {
             guard.to_follower();
         }
 
-        let last_log_term = guard
-            .log.entries
-            .last()
-            .unwrap_or(&Entry {
-                ..Default::default()
-            })
-            .term;
+        let last_log_term = guard.log.last_log_term();
 
         let can_vote = guard.voted_for.is_none() || guard.voted_for == Some(args.candidate_id);
         let is_up_to_date = args.last_log_term > last_log_term
@@ -342,17 +338,14 @@ impl RaftService for Node {
             });
         }
 
-        let prev_log = match args.prev_log_index {
-            0 => None,
-            _ => guard.log.entries.get(args.prev_log_index as usize - 1),
-        };
+        let prev_log = guard.log.entries.get(args.prev_log_index as usize);
 
         if prev_log.is_some() && prev_log.unwrap().term != args.prev_log_term {
             let prev_log_term = prev_log.unwrap().term;
 
             let conflict_index = (0..args.prev_log_index as usize)
             .rev()
-            .find(|&i| guard.log.entries.get(i).unwrap().term != prev_log_term);
+            .find(|&i| guard.log.get(i + 1).term != prev_log_term);
 
             return Ok(AppendEntriesReply {
                 term: args.term,
@@ -378,7 +371,7 @@ impl RaftService for Node {
         if guard.log.commit_index > guard.log.last_applied {
             for index in (guard.log.last_applied + 1)..=guard.log.commit_index {
                 let _ = guard.apply_ch.unbounded_send(ApplyMsg::Command {
-                    data: guard.log.entries.get(index as usize - 1).unwrap().data.to_vec(),
+                    data: guard.log.get(index as usize).data.to_vec(),
                     index,
                 });
 

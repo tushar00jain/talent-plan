@@ -27,10 +27,10 @@ impl Log {
             .unwrap_or_default()
     }
 
-    pub fn get(&self, index: usize) -> Option<&Entry> {
+    pub fn get(&self, index: usize) -> Entry {
         match index {
-            0 => None,
-            _ => self.entries.get(index - 1),
+            0 => Default::default(),
+            _ => self.entries.get(index - 1).unwrap().clone(),
         }
     }
 }
