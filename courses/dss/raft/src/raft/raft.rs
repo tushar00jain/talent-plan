@@ -209,28 +209,26 @@ impl Raft {
         let (tx, rx) = channel();
 
         let args = self.peers
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != self.me)
-        .map(|(i, _)| (
-            i, 
-            RequestVoteArgs {
-                term: self.state.term(),
-                candidate_id: self.me as u64,
-                last_log_index: self.log.entries.len() as u64,
-                last_log_term: self.log.last_log_term() as u64,
-            }
-        ))
-        .collect::<Vec<_>>();
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != self.me)
+            .map(|(i, _)| (
+                i, 
+                RequestVoteArgs {
+                    term: self.state.term(),
+                    candidate_id: self.me as u64,
+                    last_log_index: self.log.last_log_index(),
+                    last_log_term: self.log.last_log_term(),
+                }
+            ))
+            .collect::<Vec<_>>();
 
         let clone = self.clone();
 
         client.spawn(async move {
             let fut_replies = args
                 .into_iter()
-                .map(|(i, args)| {
-                    clone.send_request_vote(i, args)
-                })
+                .map(|(i, args)| clone.send_request_vote(i, args))
                 .map(|rx| async move {
                     select! {
                         r = rx.fuse() => r.unwrap().unwrap_or_default(),
@@ -257,9 +255,7 @@ impl Raft {
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != self.me as usize)
-            .map(|(i, _)| {
-                (i, self.get_append_entries_args(i))
-            })
+            .map(|(i, _)| (i, self.get_append_entries_args(i)))
             .collect::<Vec<_>>();
 
         let clone = self.clone();
@@ -267,9 +263,7 @@ impl Raft {
         client.spawn(async move {
             let fut_replies = args
             .into_iter()
-            .map(|(i, args)| {
-                (i, clone.send_append_entries(i, args))
-            })
+            .map(|(i, args)| (i, clone.send_append_entries(i, args)))
             .map(|(i, rx)| async move {
                 select! {
                     r = rx.fuse() => (i, r.unwrap().unwrap_or_default()),
@@ -287,12 +281,10 @@ impl Raft {
     pub fn get_append_entries_args(&self, server: usize) -> AppendEntriesArgs {
         let prev_log_index = self.log.next_index[server] - 1;
 
-        let prev_log_term = self.log.get(prev_log_index).term;
-
         let mut entries = Vec::default();
 
         if self.log.entries.len() >= self.log.next_index[server] as usize {
-            entries = self.log.entries[(self.log.next_index[server] as usize - 1)..].to_vec();
+            entries = self.log.entries[prev_log_index as usize..].to_vec();
         }
 
         AppendEntriesArgs {
@@ -301,7 +293,7 @@ impl Raft {
             leader_commit: self.log.commit_index,
             entries,
             prev_log_index,
-            prev_log_term,
+            prev_log_term: self.log.get(prev_log_index).term,
         }
     }
 
@@ -310,7 +302,7 @@ impl Raft {
 
         state.is_leader = true;
         state.role = Role::Leader;
-        self.log.next_index = vec![self.log.entries.len() as u64 + 1; self.peers.len()];
+        self.log.next_index = vec![self.log.last_log_index() + 1; self.peers.len()];
         self.log.match_index = vec![0; self.peers.len()];
     }
 
@@ -367,12 +359,16 @@ impl Raft {
             return Err(Error::NotLeader);
         }
 
-        let index = self.log.entries.len() as u64 + 1;
-        let term = self.state.term();
         let mut buf = vec![];
         labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
 
-        self.log.entries.push(Entry { data: buf, term });
+        let index = self.log.last_log_index() + 1;
+        let term = self.state.term();
+
+        self.log.entries.push(Entry {
+            data: buf,
+            term
+        });
 
         let client = self.peers[self.me].clone();
 
