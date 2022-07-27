@@ -315,27 +315,19 @@ impl Raft {
     }
 
     pub fn commit(&mut self) {
-        let range = (self.log.commit_index + 1)..=self.log.entries.len() as u64;
-        let n = range
-            .fold(self.log.commit_index, |acc1, commit_index| {
-                let count = (0..self.peers.len())
+        let n = (self.log.commit_index + 1..=self.log.last_log_index())
+            .fold(self.log.commit_index, |acc, commit_index| {
+                let count = 1 + (0..self.peers.len())
                     .into_iter()
                     .filter(|&server| server != self.me as usize)
-                    .fold(1, |acc2, server| {
-                        let match_index = self.log.match_index[server];
-
-                        if match_index >= commit_index {
-                            return acc2 + 1;
-                        }
-
-                        acc2
-                    });
+                    .filter(|&server| self.log.match_index[server] >= commit_index)
+                    .count();
 
                 if count >= self.peers.len() / 2 + 1 {
                     return commit_index;
                 }
 
-                acc1
+                acc
         });
 
         if n > self.log.commit_index && self.log.get(n).term == self.state.term {

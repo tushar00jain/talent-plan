@@ -1,6 +1,6 @@
 use futures::executor::block_on;
 use rand::Rng;
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -47,7 +47,11 @@ impl Node {
 
             let replies = rx.await.unwrap();
 
-            let max_term = replies.iter().fold(0, |acc, (_, reply)| max(acc, reply.term));
+            let max_term = replies
+                .iter()
+                .map(|(_, reply)| reply.term)
+                .max()
+                .unwrap();
 
             let mut guard = clone.lock().unwrap();
             let state = &mut guard.state;
@@ -115,15 +119,16 @@ impl Node {
 
             let votes = rx.await.unwrap();
 
-            let votes_count = votes.iter().fold(1, |acc, reply| {
-                if reply.vote_granted {
-                    return acc + 1;
-                }
+            let votes_count = 1 + votes
+                .iter()
+                .filter(|reply| reply.vote_granted)
+                .count();
 
-                acc
-            });
-
-            let max_term = votes.iter().fold(0, |acc, reply| max(acc, reply.term));
+            let max_term = votes
+                .iter()
+                .map(|reply| reply.term)
+                .max()
+                .unwrap();
 
             let mut guard = clone.lock().unwrap();
             let state = &mut guard.state;
@@ -291,7 +296,7 @@ impl RaftService for Node {
         let can_vote = guard.voted_for.is_none() || guard.voted_for == Some(args.candidate_id);
         let is_up_to_date = args.last_log_term > last_log_term
             || (args.last_log_term == last_log_term
-                && args.last_log_index as usize >= guard.log.entries.len());
+                && args.last_log_index >= guard.log.last_log_index());
 
         if can_vote && is_up_to_date {
             guard.voted_for = Some(args.candidate_id);
