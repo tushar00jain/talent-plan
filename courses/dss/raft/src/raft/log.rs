@@ -62,17 +62,35 @@ impl Log {
         }
     }
 
-    pub fn next_commit_index(&self, me: usize) -> Option<u64> {
+    pub fn next_commit_index_leader(&self, leader_server: usize) -> Option<u64> {
         (self.commit_index + 1..=self.last_log_index())
             .rev()
             .find(|&index| {
                 let count = 1 + (0..self.match_index.len())
                     .into_iter()
-                    .filter(|&server| server != me)
+                    .filter(|&server| server != leader_server)
                     .filter(|&server| self.match_index[server] >= index)
                     .count();
 
                 count >= self.match_index.len() / 2 + 1
             })
+    }
+
+    pub fn next_commit_index_follower(&self, leader_commit: u64) -> u64 {
+        self.last_log_index()
+            .min(leader_commit)
+    }
+
+    pub fn commit<F>(
+        &mut self, 
+        next_commit_index: u64,
+        func: F,
+    ) where F : Fn(u64, Vec<u8>) {
+        for index in self.commit_index + 1..=next_commit_index {
+            func(index, self.get(index).data.to_vec());
+
+            self.commit_index += 1;
+            self.last_applied += 1;
+        }
     }
 }
