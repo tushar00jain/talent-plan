@@ -9,6 +9,7 @@ use futures_timer::Delay;
 use std::time::{Duration, Instant};
 
 use super::errors::*;
+use super::log::*;
 use super::persister::*;
 use crate::proto::raftpb::*;
 
@@ -80,13 +81,7 @@ pub struct Raft {
     pub apply_ch: UnboundedSender<ApplyMsg>,
 
     pub voted_for: Option<u64>,
-    pub log: Vec<Log>,
-
-    pub commit_index: u64,
-    pub last_applied: u64,
-
-    pub next_index: Vec<u64>,
-    pub match_index: Vec<u64>,
+    pub log: Log,
 
     pub last_heartbeat: Option<Instant>,
 }
@@ -116,11 +111,7 @@ impl Raft {
             persister: Arc::new(persister),
             me,
             state: Default::default(),
-            log: Vec::default(),
-            commit_index: 0,
-            last_applied: 0,
-            next_index: vec![0; len],
-            match_index: vec![0; len],
+            log: Log::new(len),
             voted_for: Default::default(),
             last_heartbeat: Default::default(),
             apply_ch,
@@ -225,12 +216,12 @@ impl Raft {
         .enumerate()
         .filter(|(i, _)| *i != self.me)
         .map(|(i, _)| {
-            let last_log_term = self.log.last().unwrap_or(&Log{..Default::default()}).term;
+            let last_log_term = self.log.entries.last().unwrap_or(&Entry{..Default::default()}).term;
 
             let args = RequestVoteArgs {
                 term: self.state.term(),
                 candidate_id: self.me as u64,
-                last_log_index: self.log.len() as u64,
+                last_log_index: self.log.entries.len() as u64,
                 last_log_term,
             };
 
@@ -300,23 +291,23 @@ impl Raft {
     }
 
     pub fn get_append_entries_args(&self, server: usize) -> AppendEntriesArgs {
-        let prev_log_index = self.next_index[server] - 1;
+        let prev_log_index = self.log.next_index[server] - 1;
 
         let prev_log_term = match prev_log_index {
             0 => 0,
-            _ => self.log.get(prev_log_index as usize - 1).unwrap().term,
+            _ => self.log.entries.get(prev_log_index as usize - 1).unwrap().term,
         };
 
         let mut entries = Vec::default();
 
-        if self.log.len() >= self.next_index[server] as usize {
-            entries = self.log[(self.next_index[server] as usize - 1)..].to_vec();
+        if self.log.entries.len() >= self.log.next_index[server] as usize {
+            entries = self.log.entries[(self.log.next_index[server] as usize - 1)..].to_vec();
         }
 
         AppendEntriesArgs {
             term: self.state.term(),
             leader_id: self.me as u64,
-            leader_commit: self.commit_index,
+            leader_commit: self.log.commit_index,
             entries,
             prev_log_index,
             prev_log_term,
@@ -328,8 +319,8 @@ impl Raft {
 
         state.is_leader = true;
         state.role = Role::Leader;
-        self.next_index = vec![self.log.len() as u64 + 1; self.peers.len()];
-        self.match_index = vec![0; self.peers.len()];
+        self.log.next_index = vec![self.log.entries.len() as u64 + 1; self.peers.len()];
+        self.log.match_index = vec![0; self.peers.len()];
     }
 
     pub fn to_follower(&mut self) {
@@ -341,14 +332,14 @@ impl Raft {
     }
 
     pub fn commit(&mut self) {
-        let range = (self.commit_index + 1)..=self.log.len() as u64;
+        let range = (self.log.commit_index + 1)..=self.log.entries.len() as u64;
         let n = range
-            .fold(self.commit_index, |acc1, commit_index| {
+            .fold(self.log.commit_index, |acc1, commit_index| {
                 let count = (0..self.peers.len())
                     .into_iter()
                     .filter(|&server| server != self.me as usize)
                     .fold(1, |acc2, server| {
-                        let match_index = self.match_index[server];
+                        let match_index = self.log.match_index[server];
 
                         if match_index >= commit_index {
                             return acc2 + 1;
@@ -364,15 +355,15 @@ impl Raft {
                 acc1
         });
 
-        if n > self.commit_index && self.log.get(n as usize - 1).unwrap().term == self.state.term {
-            for index in self.commit_index + 1..=n {
+        if n > self.log.commit_index && self.log.entries.get(n as usize - 1).unwrap().term == self.state.term {
+            for index in self.log.commit_index + 1..=n {
                 let _ = self.apply_ch.unbounded_send(ApplyMsg::Command {
-                    data: self.log.get(index as usize - 1).unwrap().entry.to_vec(),
+                    data: self.log.entries.get(index as usize - 1).unwrap().data.to_vec(),
                     index,
                 });
 
-                self.commit_index += 1;
-                self.last_applied += 1;
+                self.log.commit_index += 1;
+                self.log.last_applied += 1;
             }
         }
     }
@@ -385,12 +376,12 @@ impl Raft {
             return Err(Error::NotLeader);
         }
 
-        let index = self.log.len() as u64 + 1;
+        let index = self.log.entries.len() as u64 + 1;
         let term = self.state.term();
         let mut buf = vec![];
         labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
 
-        self.log.push(Log { entry: buf, term });
+        self.log.entries.push(Entry { data: buf, term });
 
         let client = self.peers[self.me].clone();
 
@@ -435,9 +426,5 @@ impl Raft {
         let _ = &self.persister;
         let _ = &self.peers;
         let _ = &self.log;
-        let _ = &self.commit_index;
-        let _ = &self.last_applied;
-        let _ = &self.next_index;
-        let _ = &self.match_index;
     }
 }

@@ -41,7 +41,7 @@ impl Node {
 
         loop {
             let guard = clone.lock().unwrap();
-            let len = guard.log.len();
+            let len = guard.log.entries.len();
             let rx = guard.send_append_entries_to_all();
             drop(guard);
 
@@ -64,12 +64,12 @@ impl Node {
 
             for (server, reply) in replies {
                 if reply.success {
-                    guard.match_index[server] = len as u64;
-                    guard.next_index[server] = len as u64 + 1;
+                    guard.log.match_index[server] = len as u64;
+                    guard.log.next_index[server] = len as u64 + 1;
                 }
 
                 if reply.conflict {
-                    guard.next_index[server] = reply.conflict_index;
+                    guard.log.next_index[server] = reply.conflict_index;
                 }
             }
 
@@ -285,9 +285,9 @@ impl RaftService for Node {
         }
 
         let last_log_term = guard
-            .log
+            .log.entries
             .last()
-            .unwrap_or(&Log {
+            .unwrap_or(&Entry {
                 ..Default::default()
             })
             .term;
@@ -295,7 +295,7 @@ impl RaftService for Node {
         let can_vote = guard.voted_for.is_none() || guard.voted_for == Some(args.candidate_id);
         let is_up_to_date = args.last_log_term > last_log_term
             || (args.last_log_term == last_log_term
-                && args.last_log_index as usize >= guard.log.len());
+                && args.last_log_index as usize >= guard.log.entries.len());
 
         if can_vote && is_up_to_date {
             guard.voted_for = Some(args.candidate_id);
@@ -333,18 +333,18 @@ impl RaftService for Node {
 
         guard.last_heartbeat = Some(Instant::now());
 
-        if args.prev_log_index > guard.log.len() as u64 {
+        if args.prev_log_index > guard.log.entries.len() as u64 {
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,
                 conflict: true,
-                conflict_index: guard.log.len() as u64 + 1,
+                conflict_index: guard.log.entries.len() as u64 + 1,
             });
         }
 
         let prev_log = match args.prev_log_index {
             0 => None,
-            _ => guard.log.get(args.prev_log_index as usize - 1),
+            _ => guard.log.entries.get(args.prev_log_index as usize - 1),
         };
 
         if prev_log.is_some() && prev_log.unwrap().term != args.prev_log_term {
@@ -352,7 +352,7 @@ impl RaftService for Node {
 
             let conflict_index = (0..args.prev_log_index as usize)
             .rev()
-            .find(|&i| guard.log.get(i).unwrap().term != prev_log_term);
+            .find(|&i| guard.log.entries.get(i).unwrap().term != prev_log_term);
 
             return Ok(AppendEntriesReply {
                 term: args.term,
@@ -365,24 +365,24 @@ impl RaftService for Node {
             });
         }
 
-        guard.log = guard.log[..args.prev_log_index as usize].to_vec();
+        guard.log.entries = guard.log.entries[..args.prev_log_index as usize].to_vec();
 
         for entry in &args.entries {
-            guard.log.push(entry.clone());
+            guard.log.entries.push(entry.clone());
         }
 
-        if args.leader_commit > guard.commit_index {
-            guard.commit_index = min(args.leader_commit, guard.log.len() as u64);
+        if args.leader_commit > guard.log.commit_index {
+            guard.log.commit_index = min(args.leader_commit, guard.log.entries.len() as u64);
         }
 
-        if guard.commit_index > guard.last_applied {
-            for index in (guard.last_applied + 1)..=guard.commit_index {
+        if guard.log.commit_index > guard.log.last_applied {
+            for index in (guard.log.last_applied + 1)..=guard.log.commit_index {
                 let _ = guard.apply_ch.unbounded_send(ApplyMsg::Command {
-                    data: guard.log.get(index as usize - 1).unwrap().entry.to_vec(),
+                    data: guard.log.entries.get(index as usize - 1).unwrap().data.to_vec(),
                     index,
                 });
 
-                guard.last_applied += 1;
+                guard.log.last_applied += 1;
             }
         }
 

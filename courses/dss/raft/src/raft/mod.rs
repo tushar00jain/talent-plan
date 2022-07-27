@@ -6,3 +6,4 @@ pub mod raft;
 pub mod node;
 #[cfg(test)]
 mod tests;
+mod log;
