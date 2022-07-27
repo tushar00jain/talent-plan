@@ -39,10 +39,6 @@ impl Node {
     async fn start_leader_loop(&self) {
         let clone = &self.raft;
 
-        let candidate_id = { clone.lock().unwrap().me as u64 };
-
-        debug!("{} : start_leader_loop()", candidate_id);
-
         loop {
             let guard = clone.lock().unwrap();
             let len = guard.log.len();
@@ -67,8 +63,6 @@ impl Node {
             }
 
             for (server, reply) in replies {
-                debug!("{} -> append_entries()\n{:?}\n", server, reply);
-
                 if reply.success {
                     guard.match_index[server] = len as u64;
                     guard.next_index[server] = len as u64 + 1;
@@ -87,7 +81,6 @@ impl Node {
     }
 
     async fn start_follower_loop(&self) {
-        debug!("{} : start_follower_loop()", { self.raft.lock().unwrap().me });
         let clone = &self.raft;
 
         let delay = rand::thread_rng().gen_range(50, 100);
@@ -109,12 +102,9 @@ impl Node {
     async fn start_candidate_loop(&self) {
         let clone = &self.raft;
 
-        let candidate_id = { clone.lock().unwrap().me as u64 };
         let majority = { clone.lock().unwrap().peers.len() / 2 + 1 };
 
         let delay = rand::thread_rng().gen_range(25, 50);
-
-        debug!("{} start_candidate_loop()", candidate_id);
 
         loop {
             let mut guard = clone.lock().unwrap();
@@ -326,7 +316,6 @@ impl RaftService for Node {
 
     async fn append_entries(&self, args: AppendEntriesArgs) -> labrpc::Result<AppendEntriesReply> {
         let mut guard = self.raft.lock().unwrap();
-        debug!("{} <- append_entries()\n{:?}\n{:?}\n", guard.me, args, guard.log);
         let state = &mut guard.state;
 
         if args.term < state.term {

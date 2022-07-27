@@ -302,10 +302,6 @@ impl Raft {
     pub fn get_append_entries_args(&self, server: usize) -> AppendEntriesArgs {
         let prev_log_index = self.next_index[server] - 1;
 
-        if prev_log_index > self.log.len() as u64 {
-            warn!("{} -> {} get_append_entries_args() \nprev_log_index > self.log.len()", self.me, server);
-        }
-
         let prev_log_term = match prev_log_index {
             0 => 0,
             _ => self.log.get(prev_log_index as usize - 1).unwrap().term,
@@ -346,25 +342,26 @@ impl Raft {
 
     pub fn commit(&mut self) {
         let range = (self.commit_index + 1)..=self.log.len() as u64;
-        let n = range.fold(self.commit_index, |acc1, commit_index| {
-            let count = (0..self.peers.len())
-                .into_iter()
-                .filter(|&server| server != self.me as usize)
-                .fold(1, |acc2, server| {
-                    let match_index = self.match_index[server];
+        let n = range
+            .fold(self.commit_index, |acc1, commit_index| {
+                let count = (0..self.peers.len())
+                    .into_iter()
+                    .filter(|&server| server != self.me as usize)
+                    .fold(1, |acc2, server| {
+                        let match_index = self.match_index[server];
 
-                    if match_index >= commit_index {
-                        return acc2 + 1;
-                    }
+                        if match_index >= commit_index {
+                            return acc2 + 1;
+                        }
 
-                    acc2
-                });
+                        acc2
+                    });
 
-            if count >= self.peers.len() / 2 + 1 {
-                return commit_index;
-            }
+                if count >= self.peers.len() / 2 + 1 {
+                    return commit_index;
+                }
 
-            acc1
+                acc1
         });
 
         if n > self.commit_index && self.log.get(n as usize - 1).unwrap().term == self.state.term {
@@ -384,9 +381,7 @@ impl Raft {
     where
         M: labcodec::Message,
     {
-        let is_leader = self.state.is_leader();
-
-        if !is_leader {
+        if !self.state.is_leader() {
             return Err(Error::NotLeader);
         }
 
