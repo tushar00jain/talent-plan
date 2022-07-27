@@ -61,4 +61,18 @@ impl Log {
             }
         }
     }
+
+    pub fn next_commit_index(&self, me: usize) -> Option<u64> {
+        (self.commit_index + 1..=self.last_log_index())
+            .rev()
+            .find(|&index| {
+                let count = 1 + (0..self.match_index.len())
+                    .into_iter()
+                    .filter(|&server| server != me)
+                    .filter(|&server| self.match_index[server] >= index)
+                    .count();
+
+                count >= self.match_index.len() / 2 + 1
+            })
+    }
 }
