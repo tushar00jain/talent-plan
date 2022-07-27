@@ -292,14 +292,10 @@ impl RaftService for Node {
             guard.to_follower();
         }
 
-        let last_log_term = guard.log.last_log_term();
+        let can_vote = guard.voted_for
+            .map_or(true, |id| id == args.candidate_id);
 
-        let can_vote = guard.voted_for.is_none() || guard.voted_for == Some(args.candidate_id);
-        let is_up_to_date = args.last_log_term > last_log_term
-            || (args.last_log_term == last_log_term
-                && args.last_log_index >= guard.log.last_log_index());
-
-        if can_vote && is_up_to_date {
+        if can_vote && guard.log.is_up_to_date_candidate(args.last_log_index, args.last_log_term) {
             guard.voted_for = Some(args.candidate_id);
 
             guard.last_heartbeat = Some(Instant::now());
@@ -335,7 +331,7 @@ impl RaftService for Node {
 
         guard.last_heartbeat = Some(Instant::now());
 
-        if let Some(conflict_index) = guard.log.conflict_index(args.prev_log_index, args.prev_log_term) {
+        if let Some(conflict_index) = guard.log.conflict_index_follower(args.prev_log_index, args.prev_log_term) {
             return Ok(AppendEntriesReply {
                 term: args.term,
                 success: false,

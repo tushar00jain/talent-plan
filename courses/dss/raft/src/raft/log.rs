@@ -44,7 +44,19 @@ impl Log {
             .unwrap_or_default()
     }
 
-    pub fn conflict_index(
+    pub fn is_up_to_date_candidate(
+        &self,
+        last_log_index: u64,
+        last_log_term: u64,
+    ) -> bool {
+        match self.last_log_term() {
+            term if last_log_term < term => false,
+            term if last_log_term > term => true,
+            _ => last_log_index >= self.last_log_index(),
+        }
+    }
+
+    pub fn conflict_index_follower(
         &self,
         prev_log_index: u64,
         prev_log_term: u64,
