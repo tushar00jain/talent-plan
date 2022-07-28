@@ -60,8 +60,7 @@ impl Node {
             }
 
             if max_term > state.term {
-                state.term = max_term;
-                guard.to_follower();
+                guard.to_follower(max_term);
                 return;
             }
 
@@ -115,7 +114,6 @@ impl Node {
             let mut guard = clone.lock().unwrap();
             guard.state.term += 1;
             guard.voted_for = Some(guard.me as u64);
-            guard.persist();
             let rx = guard.send_request_vote_to_all();
             drop(guard);
 
@@ -140,8 +138,7 @@ impl Node {
             }
 
             if max_term > state.term {
-                state.term = max_term;
-                guard.to_follower();
+                guard.to_follower(max_term);
                 return;
             }
 
@@ -289,8 +286,7 @@ impl RaftService for Node {
         }
 
         if args.term > state.term {
-            state.term = args.term;
-            guard.to_follower();
+            guard.to_follower(args.term);
         }
 
         let can_vote = guard.voted_for
@@ -328,8 +324,7 @@ impl RaftService for Node {
         }
 
         if args.term > state.term {
-            state.term = args.term;
-            guard.to_follower();
+            guard.to_follower(args.term);
         }
 
         guard.last_heartbeat = Some(Instant::now());
