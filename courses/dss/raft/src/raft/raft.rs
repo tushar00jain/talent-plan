@@ -134,7 +134,7 @@ impl Raft {
         let ps = PersistentState {
             voted_for: self.voted_for.unwrap_or(core::u64::MAX),
             term: self.state.term(),
-            entries: self.log.entries.as_slice().into(),
+            entries: self.log.entries.clone(),
         };
 
         labcodec::encode(&ps, &mut data).unwrap();
