@@ -134,7 +134,7 @@ impl Raft {
         let ps = PersistentState {
             voted_for: self.voted_for.unwrap_or(core::u64::MAX),
             term: self.state.term(),
-            log: self.log.entries.as_slice().into(),
+            entries: self.log.entries.as_slice().into(),
         };
 
         labcodec::encode(&ps, &mut data).unwrap();
@@ -158,7 +158,7 @@ impl Raft {
                 };
 
                 self.state.term = o.term;
-                self.log.entries = o.log;
+                self.log.entries = o.entries;
             }
             Err(e) => {
                 panic!("{:?}", e);
@@ -403,16 +403,7 @@ impl Raft {
     /// Only for suppressing deadcode warnings.
     #[doc(hidden)]
     pub fn __suppress_deadcode(&mut self) {
-        let _ = self.start(&0);
         let _ = self.cond_install_snapshot(0, 0, &[]);
         let _ = self.snapshot(0, &[]);
-        let _ = self.send_request_vote(0, Default::default());
-        let _ = self.send_append_entries(0, Default::default());
-        self.persist();
-        let _ = &self.state;
-        let _ = &self.me;
-        let _ = &self.persister;
-        let _ = &self.peers;
-        let _ = &self.log;
     }
 }
