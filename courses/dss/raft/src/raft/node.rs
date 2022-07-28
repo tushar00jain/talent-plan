@@ -115,6 +115,7 @@ impl Node {
             let mut guard = clone.lock().unwrap();
             guard.state.term += 1;
             guard.voted_for = Some(guard.me as u64);
+            guard.persist();
             let rx = guard.send_request_vote_to_all();
             drop(guard);
 
@@ -300,6 +301,8 @@ impl RaftService for Node {
 
             guard.last_heartbeat = Some(Instant::now());
 
+            guard.persist();
+
             return Ok(RequestVoteReply {
                 term: args.term,
                 vote_granted: true,
@@ -342,6 +345,7 @@ impl RaftService for Node {
 
         guard.log.entries.truncate(args.prev_log_index as usize);
         guard.log.entries.extend(args.entries);
+        guard.persist();
 
         let apply_ch = guard.apply_ch.clone();
 

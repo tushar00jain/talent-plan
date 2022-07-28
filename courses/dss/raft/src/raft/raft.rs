@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::channel::mpsc::UnboundedSender;
 use futures::channel::oneshot::{channel, Receiver};
@@ -71,7 +71,7 @@ pub struct Raft {
     // RPC end points of all peers
     pub peers: Vec<RaftClient>,
     // Object to hold this peer's persisted state
-    pub persister: Arc<Mutex<Box<dyn Persister>>>,
+    pub persister: Arc<dyn Persister + Sync>,
     // this peer's index into peers[]
     pub me: usize,
     pub state: State,
@@ -98,10 +98,10 @@ impl Raft {
     pub fn new(
         peers: Vec<RaftClient>,
         me: usize,
-        persister: Mutex<Box<dyn Persister>>,
+        persister: Arc<dyn Persister + Sync>,
         apply_ch: UnboundedSender<ApplyMsg>,
     ) -> Raft {
-        let raft_state = persister.lock().unwrap().raft_state();
+        let raft_state = persister.raft_state();
 
         let log = Log::new(vec![0; peers.len()], vec![0; peers.len()]);
 
@@ -109,7 +109,7 @@ impl Raft {
         let mut rf = Raft {
             log,
             peers,
-            persister: Arc::new(persister),
+            persister,
             me,
             state: Default::default(),
             voted_for: Default::default(),
@@ -127,30 +127,43 @@ impl Raft {
     /// save Raft's persistent state to stable storage,
     /// where it can later be retrieved after a crash and restart.
     /// see paper's Figure 2 for a description of what should be persistent.
-    fn persist(&mut self) {
+    pub fn persist(&self) {
         // Your code here (2C).
-        // Example:
-        // labcodec::encode(&self.xxx, &mut data).unwrap();
-        // labcodec::encode(&self.yyy, &mut data).unwrap();
-        // self.persister.save_raft_state(data);
+        let mut data = vec![];
+        
+        let ps = PersistentState {
+            voted_for: self.voted_for.unwrap_or(core::u64::MAX),
+            term: self.state.term(),
+            log: self.log.entries.as_slice().into(),
+        };
+
+        labcodec::encode(&ps, &mut data).unwrap();
+        self.persister.save_raft_state(data);
     }
 
     /// restore previously persisted state.
     fn restore(&mut self, data: &[u8]) {
         if data.is_empty() {
             // bootstrap without any state?
+            return;
         }
         // Your code here (2C).
-        // Example:
-        // match labcodec::decode(data) {
-        //     Ok(o) => {
-        //         self.xxx = o.xxx;
-        //         self.yyy = o.yyy;
-        //     }
-        //     Err(e) => {
-        //         panic!("{:?}", e);
-        //     }
-        // }
+        let ps: std::result::Result<PersistentState, prost::DecodeError> = labcodec::decode(data);
+
+        match ps {
+            Ok(o) => {
+                self.voted_for = match o.voted_for {
+                    core::u64::MAX => None,
+                    voted_for => Some(voted_for),
+                };
+
+                self.state.term = o.term;
+                self.log.entries = o.log;
+            }
+            Err(e) => {
+                panic!("{:?}", e);
+            }
+        }
     }
 
     /// example code to send a RequestVote RPC to a server.
@@ -311,6 +324,8 @@ impl Raft {
         state.is_leader = false;
         state.role = Role::Follower;
         self.voted_for = None;
+
+        self.persist();
     }
 
     pub fn commit(&mut self) {
@@ -353,6 +368,8 @@ impl Raft {
             data: buf,
             term,
         });
+
+        self.persist();
 
         let rx = self.send_append_entries_to_all();
 
