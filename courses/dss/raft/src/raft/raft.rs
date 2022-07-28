@@ -316,8 +316,6 @@ impl Raft {
         state.role = Role::Leader;
         self.log.next_index = vec![self.log.last_log_index() + 1; self.peers.len()];
         self.log.match_index = vec![0; self.peers.len()];
-
-        self.persist();
     }
 
     pub fn to_follower(&mut self, term: u64) {
