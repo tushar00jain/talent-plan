@@ -139,7 +139,7 @@ impl Node {
         };
 
         let clone = node.clone();
-        let delay = rand::thread_rng().gen_range(50, 100);
+        let delay = rand::thread_rng().gen_range(0, 100);
 
         thread::spawn(move || {
             block_on(async move {
