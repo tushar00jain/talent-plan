@@ -168,7 +168,10 @@ impl Node {
                             let role = { clone.raft.lock().unwrap().state.role };
 
                             match role {
-                                Role::Leader => clone.start_leader_loop().await,
+                                Role::Leader => {
+                                    Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT)).await;
+                                    clone.start_leader_loop().await
+                                },
                                 // _ => unreachable!(),
                                 Role::Candidate => clone.start_candidate_loop().await,
                                 _ => (),
