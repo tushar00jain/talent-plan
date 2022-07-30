@@ -6,7 +6,7 @@ use futures::future::join_all;
 
 use futures::{select, FutureExt};
 use futures_timer::Delay;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::errors::*;
 use super::log::*;
@@ -82,8 +82,6 @@ pub struct Raft {
 
     pub voted_for: Option<u64>,
     pub log: Log,
-
-    pub last_heartbeat: Option<Instant>,
 }
 
 impl Raft {
@@ -113,7 +111,6 @@ impl Raft {
             me,
             state: Default::default(),
             voted_for: Default::default(),
-            last_heartbeat: Default::default(),
             apply_ch,
         };
 
@@ -325,6 +322,16 @@ impl Raft {
         state.is_leader = false;
         state.role = Role::Follower;
         self.voted_for = None;
+
+        self.persist();
+    }
+
+    pub fn to_candidate(&mut self) {
+        let state = &mut self.state;
+
+        state.term += 1;
+        state.role = Role::Candidate;
+        self.voted_for = Some(self.me as u64);
 
         self.persist();
     }

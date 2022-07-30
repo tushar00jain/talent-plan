@@ -1,10 +1,12 @@
+use futures::{StreamExt, select, FutureExt};
+use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::executor::block_on;
 use rand::Rng;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use futures_timer::Delay;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::errors::*;
 use crate::proto::raftpb::*;
@@ -32,146 +34,148 @@ pub const ELECTION_TIMEOUT: u64 = 200;
 pub struct Node {
     // Your code here.
     raft: Arc<Mutex<Raft>>,
+    election_timeout_tx: Arc<UnboundedSender<()>>,
+    heartbeat_timeout_tx: Arc<UnboundedSender<()>>,
 }
 
 impl Node {
     async fn start_leader_loop(&self) {
         let clone = &self.raft;
 
-        loop {
-            let guard = clone.lock().unwrap();
-            let last_index = guard.log.last_log_index();
-            let rx = guard.send_append_entries_to_all();
-            drop(guard);
+        let guard = clone.lock().unwrap();
+        let last_index = guard.log.last_log_index();
+        let rx = guard.send_append_entries_to_all();
+        drop(guard);
 
-            let replies = rx.await.unwrap();
+        let replies = rx.await.unwrap();
 
-            let max_term = replies
-                .iter()
-                .map(|(_, reply)| reply.term)
-                .max()
-                .unwrap();
+        let max_term = replies
+            .iter()
+            .map(|(_, reply)| reply.term)
+            .max()
+            .unwrap();
 
-            let mut guard = clone.lock().unwrap();
-            let state = &mut guard.state;
+        let mut guard = clone.lock().unwrap();
+        let state = &mut guard.state;
 
-            if !state.is_leader() {
-                return;
-            }
-
-            if max_term > state.term {
-                guard.to_follower(max_term);
-                return;
-            }
-
-            replies
-                .iter()
-                .filter(|(_, reply)| reply.success)
-                .for_each(|(server, _)| {
-                    guard.log.match_index[*server] = last_index;
-                    guard.log.next_index[*server] = last_index + 1;
-                });
-
-            replies
-                .iter()
-                .filter(|(_, reply)| reply.conflict)
-                .for_each(|(server, reply)| {
-                    guard.log.next_index[*server] = reply.conflict_index;
-                });
-
-            guard.commit();
-
-            drop(guard);
-            Delay::new(Duration::from_millis(HEARTBEAT_TIMEOUT)).await;
+        if !state.is_leader() {
+            return;
         }
-    }
 
-    async fn start_follower_loop(&self) {
-        let clone = &self.raft;
-
-        let delay = rand::thread_rng().gen_range(50, 100);
-
-        loop {
-            let deadline = Instant::now();
-
-            Delay::new(Duration::from_millis(ELECTION_TIMEOUT + delay)).await;
-
-            let mut guard = clone.lock().unwrap();
-
-            if guard.last_heartbeat.is_none() || guard.last_heartbeat.unwrap() < deadline {
-                guard.state.role = Role::Candidate;
-                return;
-            }
+        if max_term > state.term {
+            guard.to_follower(max_term);
+            return;
         }
+
+        replies
+            .iter()
+            .filter(|(_, reply)| reply.success)
+            .for_each(|(server, _)| {
+                guard.log.match_index[*server] = last_index;
+                guard.log.next_index[*server] = last_index + 1;
+            });
+
+        replies
+            .iter()
+            .filter(|(_, reply)| reply.conflict)
+            .for_each(|(server, reply)| {
+                guard.log.next_index[*server] = reply.conflict_index;
+            });
+
+        guard.commit();
+
+        let _ = self.heartbeat_timeout_tx.as_ref().unbounded_send(());
     }
 
     async fn start_candidate_loop(&self) {
         let clone = &self.raft;
 
-        let delay = rand::thread_rng().gen_range(25, 50);
+        let mut guard = clone.lock().unwrap();
+        guard.to_candidate();
+        guard.persist();
+        let rx = guard.send_request_vote_to_all();
+        drop(guard);
 
-        loop {
-            let mut guard = clone.lock().unwrap();
-            guard.state.term += 1;
-            guard.voted_for = Some(guard.me as u64);
-            guard.persist();
-            let rx = guard.send_request_vote_to_all();
-            drop(guard);
+        let replies = rx.await.unwrap();
 
-            let replies = rx.await.unwrap();
+        let votes_count = 1 + replies
+            .iter()
+            .filter(|reply| reply.vote_granted)
+            .count();
 
-            let votes_count = 1 + replies
-                .iter()
-                .filter(|reply| reply.vote_granted)
-                .count();
+        let max_term = replies
+            .iter()
+            .map(|reply| reply.term)
+            .max()
+            .unwrap();
 
-            let max_term = replies
-                .iter()
-                .map(|reply| reply.term)
-                .max()
-                .unwrap();
+        let mut guard = clone.lock().unwrap();
+        let state = &mut guard.state;
 
-            let mut guard = clone.lock().unwrap();
-            let state = &mut guard.state;
+        if state.role != Role::Candidate {
+            return;
+        }
 
-            if state.role != Role::Candidate {
-                return;
-            }
+        if max_term > state.term {
+            guard.to_follower(max_term);
+            return;
+        }
 
-            if max_term > state.term {
-                guard.to_follower(max_term);
-                return;
-            }
-
-            if votes_count >= guard.peers.len() / 2 + 1 {
-                guard.to_leader();
-                return;
-            }
-
-            drop(guard);
-            Delay::new(Duration::from_millis(ELECTION_TIMEOUT + delay)).await;
+        if votes_count >= guard.peers.len() / 2 + 1 {
+            guard.to_leader();
+            return;
         }
     }
 
     /// Create a new raft service.
     pub fn new(raft: Raft) -> Node {
         // Your code here.
+        let (election_timeout_tx, mut election_timeout_rx) = unbounded();
+        let (heartbeat_timeout_tx, mut heartbeat_timeout_rx) = unbounded();
+
         let node = Node {
             raft: Arc::new(Mutex::new(raft)),
+            election_timeout_tx: Arc::new(election_timeout_tx),
+            heartbeat_timeout_tx: Arc::new(heartbeat_timeout_tx),
         };
 
         let clone = node.clone();
+        let delay = rand::thread_rng().gen_range(50, 100);
 
         thread::spawn(move || {
             block_on(async move {
                 loop {
-                    let role = { clone.raft.lock().unwrap().state.role };
+                    select! {
+                        _ = Delay::new(Duration::from_millis(ELECTION_TIMEOUT + delay)).fuse() => {
+                            let role = { clone.raft.lock().unwrap().state.role };
+                            
+                            match role {
+                                Role::Follower | Role::Candidate => clone.start_candidate_loop().await,
+                                // _ => unreachable!(),
+                                Role::Leader => clone.start_leader_loop().await,
+                            }
+                        },
+                        _ = election_timeout_rx.select_next_some() => {
+                            let role = { clone.raft.lock().unwrap().state.role };
 
-                    match role {
-                        Role::Leader => clone.start_leader_loop().await,
-                        Role::Follower => clone.start_follower_loop().await,
-                        Role::Candidate => clone.start_candidate_loop().await,
-                    }
+                            match role {
+                                Role::Leader => clone.start_leader_loop().await,
+                                // _ => unreachable!(),
+                                Role::Candidate => clone.start_candidate_loop().await,
+                                _ => (),
+                            }
+                        },
+                        _ = heartbeat_timeout_rx.select_next_some() => {
+                            let role = { clone.raft.lock().unwrap().state.role };
+
+                            match role {
+                                Role::Leader => clone.start_leader_loop().await,
+                                // _ => unreachable!(),
+                                Role::Candidate => clone.start_candidate_loop().await,
+                                _ => (),
+                            }
+                        },
+                    };
                 }
             });
         });
@@ -296,7 +300,7 @@ impl RaftService for Node {
         if can_vote && guard.log.is_up_to_date_candidate(args.last_log_index, args.last_log_term) {
             guard.voted_for = Some(args.candidate_id);
 
-            guard.last_heartbeat = Some(Instant::now());
+            let _ = self.election_timeout_tx.as_ref().unbounded_send(());
 
             guard.persist();
 
@@ -328,8 +332,8 @@ impl RaftService for Node {
             guard.to_follower(args.term);
         }
 
-        guard.last_heartbeat = Some(Instant::now());
-
+        let _ = self.election_timeout_tx.as_ref().unbounded_send(());
+        
         if let Some(conflict_index) = guard.log.conflict_index_follower(args.prev_log_index, args.prev_log_term) {
             return Ok(AppendEntriesReply {
                 term: args.term,
