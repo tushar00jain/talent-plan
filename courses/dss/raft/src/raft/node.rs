@@ -79,7 +79,7 @@ impl Node {
             .iter()
             .filter(|(_, reply)| reply.conflict)
             .for_each(|(server, reply)| {
-                guard.log.next_index[*server] = reply.conflict_index;
+                guard.log.next_index[*server] = (guard.log.match_index[*server] + 1).min(reply.conflict_index + 1);
             });
 
         guard.commit();
@@ -341,7 +341,7 @@ impl RaftService for Node {
                 term: args.term,
                 success: false,
                 conflict: true,
-                conflict_index: conflict_index + 1,
+                conflict_index,
             });
         }
 
