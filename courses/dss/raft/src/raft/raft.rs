@@ -289,10 +289,10 @@ impl Raft {
     }
 
     pub fn get_append_entries_args(&self, server: usize) -> AppendEntriesArgs {
-        let prev_log_index = self.log.next_index[server] - 1;
+        let next_index = self.log.next_index[server];
 
         let entries = match self.log.last_log_index() {
-            index if prev_log_index < index => self.log.entries[prev_log_index as usize..].to_vec(),
+            index if next_index <= index => self.log.get_entries(next_index),
             _ => Default::default(),
         };
 
@@ -301,8 +301,8 @@ impl Raft {
             leader_id: self.me as u64,
             leader_commit: self.log.commit_index,
             entries,
-            prev_log_index,
-            prev_log_term: self.log.get(prev_log_index).term,
+            prev_log_index: next_index - 1,
+            prev_log_term: self.log.get(next_index - 1).term,
         }
     }
 

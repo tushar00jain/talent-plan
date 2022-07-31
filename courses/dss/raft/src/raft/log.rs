@@ -33,6 +33,13 @@ impl Log {
         }
     }
 
+    pub fn get_entries(&self, index: u64) -> Vec<Entry> {
+        match index {
+            0 => Default::default(),
+            _ => self.entries[index as usize - 1..].to_vec(),
+        }
+    }
+
     pub fn last_log_index(&self) -> u64 {
         self.entries.len() as u64
     }
