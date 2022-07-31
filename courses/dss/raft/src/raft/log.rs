@@ -81,6 +81,16 @@ impl Log {
         }
     }
 
+    pub fn conflict_index_leader(
+        &self,
+        conflict_index: u64,
+        server: usize,
+    ) -> u64 {
+        conflict_index
+            .min(self.next_index[server] - 1)
+            .max(self.match_index[server])
+    }
+
     pub fn next_commit_index_leader(&self, leader_server: usize) -> Option<u64> {
         (self.commit_index + 1..=self.last_log_index())
             .rev()

@@ -79,7 +79,7 @@ impl Node {
             .iter()
             .filter(|(_, reply)| reply.conflict)
             .for_each(|(server, reply)| {
-                guard.log.next_index[*server] = (guard.log.match_index[*server] + 1).min(reply.conflict_index + 1);
+                guard.log.next_index[*server] = guard.log.conflict_index_leader(reply.conflict_index, *server) + 1;
             });
 
         guard.commit();
