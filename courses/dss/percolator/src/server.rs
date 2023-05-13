@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::msg::*;
 use crate::service::*;
@@ -14,6 +14,7 @@ const TTL: u64 = Duration::from_millis(100).as_nanos() as u64;
 #[derive(Clone, Default)]
 pub struct TimestampOracle {
     // You definitions here if needed.
+    timestamp: Arc<Mutex<u128>>,
 }
 
 #[async_trait::async_trait]
@@ -21,7 +22,14 @@ impl timestamp::Service for TimestampOracle {
     // example get_timestamp RPC handler.
     async fn get_timestamp(&self, _: TimestampRequest) -> labrpc::Result<TimestampResponse> {
         // Your code here.
-        unimplemented!()
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos();
+        let mut timestamp = self.timestamp.lock().unwrap();
+
+        *timestamp = max(now, *timestamp + 1);
+
+        Ok(TimestampResponse {
+            timestamp: *timestamp,
+        })
     }
 }
 
@@ -53,6 +61,15 @@ pub struct KvTable {
 }
 
 impl KvTable {
+    #[inline]
+    fn get_table(column: Column) -> &BTreeMap<Key, Value> {
+        match column {
+            Write => self.write,
+            Data => self.data,
+            Lock => self.lock,
+        }
+    }
+
     // Reads the latest key-value record from a specified column
     // in MemoryStorage with a given key and a timestamp range.
     #[inline]
@@ -64,21 +81,27 @@ impl KvTable {
         ts_end_inclusive: Option<u64>,
     ) -> Option<(&Key, &Value)> {
         // Your code here.
-        unimplemented!()
+        let start_key = Included(&Key(&key, &ts_start_inclusive));
+        let end_key = Included(&Key(&key, &ts_end_inclusive));
+
+        match self.get_column(column).range((start_key, end_key)).last() {
+            Some(key, value) => Some((key, value)),
+            None => None,
+        }
     }
 
     // Writes a record to a specified column in MemoryStorage.
     #[inline]
     fn write(&mut self, key: Vec<u8>, column: Column, ts: u64, value: Value) {
         // Your code here.
-        unimplemented!()
+        self.get_column(column).insert(Key(key, ts), value);
     }
 
     #[inline]
     // Erases a record from a specified column in MemoryStorage.
     fn erase(&mut self, key: Vec<u8>, column: Column, commit_ts: u64) {
         // Your code here.
-        unimplemented!()
+        self.get_column(column).remove_entry(Key(key, commit_ts));
     }
 }
 

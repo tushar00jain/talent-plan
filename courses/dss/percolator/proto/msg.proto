@@ -13,7 +13,9 @@ package msg;
 
 message TimestampRequest {}
 
-message TimestampResponse {}
+message TimestampResponse {
+    uint128 timestamp = 1;
+}
 
 message GetRequest {}
 
