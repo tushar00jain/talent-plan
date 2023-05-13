@@ -183,7 +183,16 @@ impl transaction::Service for MemoryStorage {
     // example commit RPC handler.
     async fn commit(&self, req: CommitRequest) -> labrpc::Result<CommitResponse> {
         // Your code here.
-        unimplemented!()
+        let mut table = self.data.lock().unwrap();
+
+        if table.read(req.key.clone(), Column::Lock, Some(req.start_ts), Some(req.start_ts)).is_none() {
+            return Err(Error::Stopped)
+        }
+
+        table.write(req.key.clone(), Column::Write, req.start_ts, Value::Timestamp(req.start_ts));
+        table.erase(req.key.clone(), Column::Lock, req.start_ts);
+
+        Ok(CommitResponse {})
     }
 }
 

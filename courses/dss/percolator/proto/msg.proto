@@ -37,6 +37,8 @@ message PrewriteResponse {}
 
 message CommitRequest {
     bool is_primary = 1;
+    uint64 start_ts = 2;
+    bytes key = 3;
 }
 
 message CommitResponse {}
