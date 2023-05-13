@@ -26,7 +26,12 @@ message GetResponse {
     bytes value = 1;
 }
 
-message PrewriteRequest {}
+message PrewriteRequest {
+    bytes primary_key = 1;
+    bytes key = 2;
+    uint64 start_ts = 3;
+    bytes value = 4;
+}
 
 message PrewriteResponse {}
 

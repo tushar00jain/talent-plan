@@ -164,7 +164,20 @@ impl transaction::Service for MemoryStorage {
     // example prewrite RPC handler.
     async fn prewrite(&self, req: PrewriteRequest) -> labrpc::Result<PrewriteResponse> {
         // Your code here.
-        unimplemented!()
+        let mut table = self.data.lock().unwrap();
+
+        if table.read(req.key.clone(), Column::Write, Some(req.start_ts), Some(u64::MAX)).is_some() {
+            return Err(Error::Stopped)
+        }
+
+        if table.read(req.key.clone(), Column::Lock, Some(0), Some(u64::MAX)).is_some() {
+            return Err(Error::Stopped)
+        }
+
+        table.write(req.key.clone(), Column::Data, req.start_ts, Value::Vector(req.value));
+        table.write(req.key.clone(), Column::Lock, req.start_ts, Value::Vector(req.primary_key));
+
+        Ok(PrewriteResponse {})
     }
 
     // example commit RPC handler.
