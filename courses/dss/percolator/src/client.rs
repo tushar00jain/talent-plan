@@ -22,6 +22,8 @@ pub struct Client {
     // Your definitions here.
     tso_client: TSOClient,
     txn_client: TransactionClient,
+    writes: Vec<(Vec<u8>, Vec<u8>)>,
+    start_ts: u64,
 }
 
 impl Client {
@@ -31,33 +33,41 @@ impl Client {
         Client {
             tso_client,
             txn_client,
+            writes: Vec::new(),
+            start_ts: 0,
         }
     }
 
     /// Gets a timestamp from a TSO.
     pub fn get_timestamp(&self) -> Result<u64> {
         // Your code here.
-        executor::block_on(self.tso_client.get_timestamp(&TimestampRequest {}))
+        executor::block_on(
+            self
+                .tso_client
+                .get_timestamp(&TimestampRequest {})
+        )
             .map(|result| result.timestamp)
     }
 
     /// Begins a new transaction.
     pub fn begin(&mut self) {
         // Your code here.
-        unimplemented!()
+        self.start_ts = self.get_timestamp().unwrap();
     }
 
     /// Gets the value for a given key.
     pub fn get(&self, key: Vec<u8>) -> Result<Vec<u8>> {
         // Your code here.
-        executor::block_on(self.txn_client.get(&GetRequest { key }))
+        executor::block_on(
+            self.txn_client.get(&GetRequest { key, start_ts: self.start_ts })
+        )
             .map(|result| result.value)
     }
 
     /// Sets keys in a buffer until commit time.
     pub fn set(&mut self, key: Vec<u8>, value: Vec<u8>) {
         // Your code here.
-        unimplemented!()
+        self.writes.push((key, value));
     }
 
     /// Commits a transaction.

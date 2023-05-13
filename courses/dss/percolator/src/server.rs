@@ -5,6 +5,8 @@ use std::u64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use labrpc::Error;
+
 use crate::msg::*;
 use crate::service::*;
 use crate::*;
@@ -124,16 +126,38 @@ impl transaction::Service for MemoryStorage {
     // example get RPC handler.
     async fn get(&self, req: GetRequest) -> labrpc::Result<GetResponse> {
         // Your code here.
-        match self.data.lock().unwrap().read(req.key, Column::Data, Some(0), Some(u64::MAX)) {
-            Some((_, value)) => {
-                match value {
-                    Value::Vector(vector) => Ok(GetResponse {
-                        value: vector.to_vec(),
-                    }),
-                    Value::Timestamp(_) => Err(labrpc::Error::Stopped),
-                }
-            } 
-            None => Err(labrpc::Error::Stopped),
+        loop {
+            let mut table = self.data.lock().unwrap();
+
+            if table
+                .read(req.key.clone(), Column::Lock, Some(0), Some(req.start_ts))
+                .is_some() {
+                self.back_off_maybe_clean_up_lock(req.start_ts, req.key.clone());
+                continue;
+            };
+
+            let latest_write = table
+                .read(req.key.clone(), Column::Write, Some(0), Some(req.start_ts));
+
+            if latest_write.is_none() {
+                return Ok(GetResponse { value: Vec::new() })
+            }
+
+            let data_ts = latest_write
+                .map(|((_, data_ts), _)| { data_ts.clone() })
+                .unwrap();
+
+            let value = table
+                .read(req.key.clone(), Column::Data, Some(data_ts), Some(data_ts))
+                .map(|(_, value)| { value })
+                .unwrap();
+
+            return match value {
+                Value::Vector(value) => return Ok(GetResponse {
+                    value: value.clone(),
+                }),
+                Value::Timestamp(_) => return Err(Error::Stopped),
+            }
         }
     }
 
