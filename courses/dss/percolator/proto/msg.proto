@@ -14,12 +14,16 @@ package msg;
 message TimestampRequest {}
 
 message TimestampResponse {
-    uint128 timestamp = 1;
+    uint64 timestamp = 1;
 }
 
-message GetRequest {}
+message GetRequest {
+    bytes key = 1;
+}
 
-message GetResponse {}
+message GetResponse {
+    bytes value = 1;
+}
 
 message PrewriteRequest {}
 

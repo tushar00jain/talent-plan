@@ -1,6 +1,7 @@
+use futures::executor;
 use labrpc::*;
 
-use crate::service::{TSOClient, TransactionClient};
+use crate::{service::{TSOClient, TransactionClient}, msg::{TimestampRequest, GetRequest}};
 
 // BACKOFF_TIME_MS is the wait time before retrying to send the request.
 // It should be exponential growth. e.g.
@@ -19,19 +20,25 @@ const RETRY_TIMES: usize = 3;
 #[derive(Clone)]
 pub struct Client {
     // Your definitions here.
+    tso_client: TSOClient,
+    txn_client: TransactionClient,
 }
 
 impl Client {
     /// Creates a new Client.
     pub fn new(tso_client: TSOClient, txn_client: TransactionClient) -> Client {
         // Your code here.
-        Client {}
+        Client {
+            tso_client,
+            txn_client,
+        }
     }
 
     /// Gets a timestamp from a TSO.
     pub fn get_timestamp(&self) -> Result<u64> {
         // Your code here.
-        unimplemented!()
+        executor::block_on(self.tso_client.get_timestamp(&TimestampRequest {}))
+            .map(|result| result.timestamp)
     }
 
     /// Begins a new transaction.
@@ -43,7 +50,8 @@ impl Client {
     /// Gets the value for a given key.
     pub fn get(&self, key: Vec<u8>) -> Result<Vec<u8>> {
         // Your code here.
-        unimplemented!()
+        executor::block_on(self.txn_client.get(&GetRequest { key }))
+            .map(|result| result.value)
     }
 
     /// Sets keys in a buffer until commit time.

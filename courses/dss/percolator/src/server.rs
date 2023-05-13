@@ -1,4 +1,7 @@
+use std::ops::Bound::Included;
+use std::cmp::max;
 use std::collections::BTreeMap;
+use std::u64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -14,7 +17,7 @@ const TTL: u64 = Duration::from_millis(100).as_nanos() as u64;
 #[derive(Clone, Default)]
 pub struct TimestampOracle {
     // You definitions here if needed.
-    timestamp: Arc<Mutex<u128>>,
+    timestamp: Arc<Mutex<u64>>,
 }
 
 #[async_trait::async_trait]
@@ -22,7 +25,7 @@ impl timestamp::Service for TimestampOracle {
     // example get_timestamp RPC handler.
     async fn get_timestamp(&self, _: TimestampRequest) -> labrpc::Result<TimestampResponse> {
         // Your code here.
-        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos();
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64;
         let mut timestamp = self.timestamp.lock().unwrap();
 
         *timestamp = max(now, *timestamp + 1);
@@ -62,11 +65,11 @@ pub struct KvTable {
 
 impl KvTable {
     #[inline]
-    fn get_table(column: Column) -> &BTreeMap<Key, Value> {
+    fn get_column(&mut self, column: Column) -> &mut BTreeMap<Key, Value> {
         match column {
-            Write => self.write,
-            Data => self.data,
-            Lock => self.lock,
+            Column::Write => &mut self.write,
+            Column::Data => &mut self.data,
+            Column::Lock => &mut self.lock,
         }
     }
 
@@ -74,34 +77,38 @@ impl KvTable {
     // in MemoryStorage with a given key and a timestamp range.
     #[inline]
     fn read(
-        &self,
+        &mut self,
         key: Vec<u8>,
         column: Column,
         ts_start_inclusive: Option<u64>,
         ts_end_inclusive: Option<u64>,
     ) -> Option<(&Key, &Value)> {
         // Your code here.
-        let start_key = Included(&Key(&key, &ts_start_inclusive));
-        let end_key = Included(&Key(&key, &ts_end_inclusive));
-
-        match self.get_column(column).range((start_key, end_key)).last() {
-            Some(key, value) => Some((key, value)),
-            None => None,
-        }
+        self
+            .get_column(column)
+            .range((
+                Included((key.clone(), ts_start_inclusive.unwrap())),
+                Included((key, ts_end_inclusive.unwrap())),
+            ))
+            .last()
     }
 
     // Writes a record to a specified column in MemoryStorage.
     #[inline]
     fn write(&mut self, key: Vec<u8>, column: Column, ts: u64, value: Value) {
         // Your code here.
-        self.get_column(column).insert(Key(key, ts), value);
+        self
+            .get_column(column)
+            .insert((key, ts), value);
     }
 
     #[inline]
     // Erases a record from a specified column in MemoryStorage.
     fn erase(&mut self, key: Vec<u8>, column: Column, commit_ts: u64) {
         // Your code here.
-        self.get_column(column).remove_entry(Key(key, commit_ts));
+        self
+            .get_column(column)
+            .remove_entry(&(key, commit_ts));
     }
 }
 
@@ -117,7 +124,17 @@ impl transaction::Service for MemoryStorage {
     // example get RPC handler.
     async fn get(&self, req: GetRequest) -> labrpc::Result<GetResponse> {
         // Your code here.
-        unimplemented!()
+        match self.data.lock().unwrap().read(req.key, Column::Data, Some(0), Some(u64::MAX)) {
+            Some((_, value)) => {
+                match value {
+                    Value::Vector(vector) => Ok(GetResponse {
+                        value: vector.to_vec(),
+                    }),
+                    Value::Timestamp(_) => Err(labrpc::Error::Stopped),
+                }
+            } 
+            None => Err(labrpc::Error::Stopped),
+        }
     }
 
     // example prewrite RPC handler.
