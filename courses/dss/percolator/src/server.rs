@@ -223,10 +223,12 @@ impl MemoryStorage {
 
         let ts = ts.clone();
 
-        if table.read(key.clone(), Column::Write, Some(0), Some(ts)).is_none() {
-            table.erase(key.clone(), Column::Lock, ts.clone());
+        table.erase(key.clone(), Column::Lock, ts.clone());
+
+        if table
+            .read(key.clone(), Column::Write, Some(0), Some(ts))
+            .is_some() {
+            table.write(key.clone(), Column::Write, ts.clone(), Value::Timestamp(ts.clone()));
         }
-                
-        table.write(key.clone(), Column::Write, ts.clone(), Value::Timestamp(ts.clone()));
     }
 }
