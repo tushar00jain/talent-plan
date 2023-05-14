@@ -1,9 +1,12 @@
-use std::{thread, time::Duration, convert::TryInto, ops::Mul, clone};
+use std::{clone, convert::TryInto, ops::Mul, thread, time::Duration};
 
 use futures::{executor, Future};
 use labrpc::*;
 
-use crate::{service::{TSOClient, TransactionClient}, msg::{TimestampRequest, GetRequest, PrewriteRequest, CommitRequest}};
+use crate::{
+    msg::{CommitRequest, GetRequest, PrewriteRequest, TimestampRequest},
+    service::{TSOClient, TransactionClient},
+};
 
 // BACKOFF_TIME_MS is the wait time before retrying to send the request.
 // It should be exponential growth. e.g.
@@ -43,11 +46,7 @@ impl Client {
     /// Gets a timestamp from a TSO.
     pub fn get_timestamp(&self) -> Result<u64> {
         // Your code here.
-        executor::block_on(
-            self
-                .tso_client
-                .get_timestamp(&TimestampRequest {})
-        )
+        executor::block_on(self.tso_client.get_timestamp(&TimestampRequest {}))
             .map(|result| result.timestamp)
     }
 
@@ -61,12 +60,11 @@ impl Client {
     pub fn get(&self, key: Vec<u8>) -> Result<Vec<u8>> {
         // Your code here.
         throttled_exponential_backoff(|| {
-            executor::block_on(
-                self.txn_client.get(&GetRequest {
-                    key: key.clone(),
-                    start_ts: self.start_ts,
-                }))
-                .map(|result| result.value)
+            executor::block_on(self.txn_client.get(&GetRequest {
+                key: key.clone(),
+                start_ts: self.start_ts,
+            }))
+            .map(|result| result.value)
         })
     }
 
@@ -84,12 +82,12 @@ impl Client {
         for (key, value) in &self.writes {
             throttled_exponential_backoff(|| {
                 executor::block_on(self.txn_client.prewrite(&PrewriteRequest {
-                        key: key.clone(),
-                        start_ts: self.start_ts,
-                        value: value.clone(),
-                        primary_key: key.clone(),
-                    }))
-                })?;
+                    key: key.clone(),
+                    start_ts: self.start_ts,
+                    value: value.clone(),
+                    primary_key: key.clone(),
+                }))
+            })?;
         }
 
         let commit_ts = self.get_timestamp()?;
@@ -111,7 +109,10 @@ impl Client {
     }
 }
 
-fn throttled_exponential_backoff<F, T>(mut f: F) -> Result<T> where F: FnMut() -> Result<T> {
+fn throttled_exponential_backoff<F, T>(mut f: F) -> Result<T>
+where
+    F: FnMut() -> Result<T>,
+{
     for i in 0.. {
         let result = f();
 
@@ -120,9 +121,8 @@ fn throttled_exponential_backoff<F, T>(mut f: F) -> Result<T> where F: FnMut() -
         }
 
         thread::sleep(Duration::from_millis(
-            2_u64
-                .pow(i.try_into().unwrap())
-                .mul(BACKOFF_TIME_MS)));
+            2_u64.pow(i.try_into().unwrap()).mul(BACKOFF_TIME_MS),
+        ));
     }
 
     unreachable!()

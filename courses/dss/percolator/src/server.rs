@@ -1,9 +1,9 @@
-use std::ops::Bound::Included;
 use std::cmp::max;
 use std::collections::BTreeMap;
-use std::{u64, thread};
+use std::ops::Bound::Included;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+use std::{thread, u64};
 
 use labrpc::Error;
 
@@ -25,9 +25,16 @@ pub struct TimestampOracle {
 #[async_trait::async_trait]
 impl timestamp::Service for TimestampOracle {
     // example get_timestamp RPC handler.
-    async fn get_timestamp(&self, _: TimestampRequest) -> labrpc::Result<TimestampResponse> {
+    async fn get_timestamp(
+        &self,
+        _: TimestampRequest,
+    ) -> labrpc::Result<TimestampResponse> {
         // Your code here.
-        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
         let mut timestamp = self.timestamp.lock().unwrap();
 
         *timestamp = max(now, *timestamp + 1);
@@ -94,8 +101,7 @@ impl KvTable {
         ts_end_inclusive: Option<u64>,
     ) -> Option<(&Key, &Value)> {
         // Your code here.
-        self
-            .get_column(column)
+        self.get_column(column)
             .range((
                 Included((key.clone(), ts_start_inclusive.unwrap())),
                 Included((key, ts_end_inclusive.unwrap())),
@@ -107,18 +113,14 @@ impl KvTable {
     #[inline]
     fn write(&mut self, key: Vec<u8>, column: Column, ts: u64, value: Value) {
         // Your code here.
-        self
-            .get_column_mut(column)
-            .insert((key, ts), value);
+        self.get_column_mut(column).insert((key, ts), value);
     }
 
     #[inline]
     // Erases a record from a specified column in MemoryStorage.
     fn erase(&mut self, key: Vec<u8>, column: Column, commit_ts: u64) {
         // Your code here.
-        self
-            .get_column_mut(column)
-            .remove_entry(&(key, commit_ts));
+        self.get_column_mut(column).remove_entry(&(key, commit_ts));
     }
 }
 
@@ -138,67 +140,127 @@ impl transaction::Service for MemoryStorage {
             let mut table = self.data.lock().unwrap();
 
             if table
-                .read(req.key.clone(), Column::Lock, Some(0), Some(req.start_ts))
-                .is_some() {
+                .read(
+                    req.key.clone(),
+                    Column::Lock,
+                    Some(0),
+                    Some(req.start_ts),
+                )
+                .is_some()
+            {
                 drop(table);
-                self.back_off_maybe_clean_up_lock(req.start_ts, req.key.clone());
+                self.back_off_maybe_clean_up_lock(
+                    req.start_ts,
+                    req.key.clone(),
+                );
                 continue;
             };
 
-            let latest_write = table
-                .read(req.key.clone(), Column::Write, Some(0), Some(req.start_ts));
+            let latest_write = table.read(
+                req.key.clone(),
+                Column::Write,
+                Some(0),
+                Some(req.start_ts),
+            );
 
             if latest_write.is_none() {
-                return Ok(GetResponse { value: Vec::new() })
+                return Ok(GetResponse { value: Vec::new() });
             }
 
             let data_ts = latest_write
-                .map(|((_, data_ts), _)| { data_ts.clone() })
+                .map(|((_, data_ts), _)| data_ts.clone())
                 .unwrap();
 
             let value = table
-                .read(req.key.clone(), Column::Data, Some(data_ts), Some(data_ts))
-                .map(|(_, value)| { value })
+                .read(
+                    req.key.clone(),
+                    Column::Data,
+                    Some(data_ts),
+                    Some(data_ts),
+                )
+                .map(|(_, value)| value)
                 .unwrap();
 
             return match value {
-                Value::Vector(value) => return Ok(GetResponse {
-                    value: value.clone(),
-                }),
+                Value::Vector(value) => {
+                    return Ok(GetResponse {
+                        value: value.clone(),
+                    })
+                }
                 Value::Timestamp(_) => return Err(Error::Stopped),
-            }
+            };
         }
     }
 
     // example prewrite RPC handler.
-    async fn prewrite(&self, req: PrewriteRequest) -> labrpc::Result<PrewriteResponse> {
+    async fn prewrite(
+        &self,
+        req: PrewriteRequest,
+    ) -> labrpc::Result<PrewriteResponse> {
         // Your code here.
         let mut table = self.data.lock().unwrap();
 
-        if table.read(req.key.clone(), Column::Write, Some(req.start_ts), Some(u64::MAX)).is_some() {
-            return Err(Error::Stopped)
+        if table
+            .read(
+                req.key.clone(),
+                Column::Write,
+                Some(req.start_ts),
+                Some(u64::MAX),
+            )
+            .is_some()
+        {
+            return Err(Error::Stopped);
         }
 
-        if table.read(req.key.clone(), Column::Lock, Some(0), Some(u64::MAX)).is_some() {
-            return Err(Error::Stopped)
+        if table
+            .read(req.key.clone(), Column::Lock, Some(0), Some(u64::MAX))
+            .is_some()
+        {
+            return Err(Error::Stopped);
         }
 
-        table.write(req.key.clone(), Column::Data, req.start_ts, Value::Vector(req.value));
-        table.write(req.key.clone(), Column::Lock, req.start_ts, Value::Vector(req.primary_key));
+        table.write(
+            req.key.clone(),
+            Column::Data,
+            req.start_ts,
+            Value::Vector(req.value),
+        );
+        table.write(
+            req.key.clone(),
+            Column::Lock,
+            req.start_ts,
+            Value::Vector(req.primary_key),
+        );
 
         Ok(PrewriteResponse {})
     }
 
     // example commit RPC handler.
-    async fn commit(&self, req: CommitRequest) -> labrpc::Result<CommitResponse> {
+    async fn commit(
+        &self,
+        req: CommitRequest,
+    ) -> labrpc::Result<CommitResponse> {
         // Your code here.
         let mut table = self.data.lock().unwrap();
 
-        if table.read(req.key.clone(), Column::Lock, Some(req.start_ts), Some(req.start_ts)).is_none() {
-            return Err(Error::Stopped)
+        if table
+            .read(
+                req.key.clone(),
+                Column::Lock,
+                Some(req.start_ts),
+                Some(req.start_ts),
+            )
+            .is_none()
+        {
+            return Err(Error::Stopped);
         }
 
-        table.write(req.key.clone(), Column::Write, req.commit_ts, Value::Timestamp(req.start_ts));
+        table.write(
+            req.key.clone(),
+            Column::Write,
+            req.commit_ts,
+            Value::Timestamp(req.start_ts),
+        );
         table.erase(req.key.clone(), Column::Lock, req.start_ts);
 
         Ok(CommitResponse {})
@@ -225,10 +287,16 @@ impl MemoryStorage {
 
         table.erase(key.clone(), Column::Lock, ts.clone());
 
-        if let Some(((_, commit_ts), _)) =  table
-            .read(key.clone(), Column::Write, Some(0), Some(ts)) {
-                let commit_ts = commit_ts.clone();
-                table.write(key.clone(), Column::Write, commit_ts.clone(), Value::Timestamp(ts.clone()));
-            }
+        if let Some(((_, commit_ts), _)) =
+            table.read(key.clone(), Column::Write, Some(0), Some(ts))
+        {
+            let commit_ts = commit_ts.clone();
+            table.write(
+                key.clone(),
+                Column::Write,
+                commit_ts.clone(),
+                Value::Timestamp(ts.clone()),
+            );
+        }
     }
 }
