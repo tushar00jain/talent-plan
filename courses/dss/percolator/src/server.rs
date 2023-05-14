@@ -1,7 +1,7 @@
 use std::ops::Bound::Included;
 use std::cmp::max;
 use std::collections::BTreeMap;
-use std::u64;
+use std::{u64, thread};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -67,7 +67,15 @@ pub struct KvTable {
 
 impl KvTable {
     #[inline]
-    fn get_column(&mut self, column: Column) -> &mut BTreeMap<Key, Value> {
+    fn get_column(&self, column: Column) -> &BTreeMap<Key, Value> {
+        match column {
+            Column::Write => &self.write,
+            Column::Data => &self.data,
+            Column::Lock => &self.lock,
+        }
+    }
+
+    fn get_column_mut(&mut self, column: Column) -> &mut BTreeMap<Key, Value> {
         match column {
             Column::Write => &mut self.write,
             Column::Data => &mut self.data,
@@ -79,7 +87,7 @@ impl KvTable {
     // in MemoryStorage with a given key and a timestamp range.
     #[inline]
     fn read(
-        &mut self,
+        &self,
         key: Vec<u8>,
         column: Column,
         ts_start_inclusive: Option<u64>,
@@ -100,7 +108,7 @@ impl KvTable {
     fn write(&mut self, key: Vec<u8>, column: Column, ts: u64, value: Value) {
         // Your code here.
         self
-            .get_column(column)
+            .get_column_mut(column)
             .insert((key, ts), value);
     }
 
@@ -109,7 +117,7 @@ impl KvTable {
     fn erase(&mut self, key: Vec<u8>, column: Column, commit_ts: u64) {
         // Your code here.
         self
-            .get_column(column)
+            .get_column_mut(column)
             .remove_entry(&(key, commit_ts));
     }
 }
@@ -132,6 +140,7 @@ impl transaction::Service for MemoryStorage {
             if table
                 .read(req.key.clone(), Column::Lock, Some(0), Some(req.start_ts))
                 .is_some() {
+                drop(table);
                 self.back_off_maybe_clean_up_lock(req.start_ts, req.key.clone());
                 continue;
             };
@@ -199,6 +208,25 @@ impl transaction::Service for MemoryStorage {
 impl MemoryStorage {
     fn back_off_maybe_clean_up_lock(&self, start_ts: u64, key: Vec<u8>) {
         // Your code here.
-        unimplemented!()
+        thread::sleep(Duration::from_nanos(TTL));
+
+        let mut table = self.data.lock().unwrap();
+
+        let Some(((_, ts), value)) = table
+            .read(key.clone(), Column::Lock, Some(0), Some(start_ts)) else {
+                return;
+            };
+
+        let Value::Vector(primary_key) = value else {
+            panic!("Stopped");
+        };
+
+        let ts = ts.clone();
+
+        if table.read(key.clone(), Column::Write, Some(0), Some(ts)).is_none() {
+            table.erase(key.clone(), Column::Lock, ts.clone());
+        }
+                
+        table.write(key.clone(), Column::Write, ts.clone(), Value::Timestamp(ts.clone()));
     }
 }
