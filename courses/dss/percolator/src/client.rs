@@ -1,4 +1,6 @@
-use futures::executor;
+use std::{thread, time::Duration, convert::TryInto, ops::Mul, clone};
+
+use futures::{executor, Future};
 use labrpc::*;
 
 use crate::{service::{TSOClient, TransactionClient}, msg::{TimestampRequest, GetRequest, PrewriteRequest, CommitRequest}};
@@ -58,10 +60,14 @@ impl Client {
     /// Gets the value for a given key.
     pub fn get(&self, key: Vec<u8>) -> Result<Vec<u8>> {
         // Your code here.
-        executor::block_on(
-            self.txn_client.get(&GetRequest { key, start_ts: self.start_ts })
-        )
-            .map(|result| result.value)
+        throttled_exponential_backoff(|| {
+            executor::block_on(
+                self.txn_client.get(&GetRequest {
+                    key: key.clone(),
+                    start_ts: self.start_ts,
+                }))
+                .map(|result| result.value)
+        })
     }
 
     /// Sets keys in a buffer until commit time.
@@ -76,31 +82,48 @@ impl Client {
         let (primary_key, _) = &self.writes[0];
 
         for (key, value) in &self.writes {
-            executor::block_on(
-                self.txn_client.prewrite(&PrewriteRequest {
-                    key: key.clone(),
-                    start_ts: self.start_ts,
-                    value: value.clone(),
-                    primary_key: key.clone(),
-                })
-            )?;
+            throttled_exponential_backoff(|| {
+                executor::block_on(self.txn_client.prewrite(&PrewriteRequest {
+                        key: key.clone(),
+                        start_ts: self.start_ts,
+                        value: value.clone(),
+                        primary_key: key.clone(),
+                    }))
+                })?;
         }
 
         let commit_ts = self.get_timestamp()?;
 
         let mut is_primary = true;
         for (key, value) in &self.writes {
-            executor::block_on(
-                self.txn_client.commit(&CommitRequest {
+            throttled_exponential_backoff(|| {
+                executor::block_on(self.txn_client.commit(&CommitRequest {
                     is_primary,
                     key: key.clone(),
                     start_ts: self.start_ts,
                     commit_ts,
-                })
-            )?;
+                }))
+            })?;
             is_primary = false;
         }
 
         Ok(true)
     }
+}
+
+fn throttled_exponential_backoff<F, T>(mut f: F) -> Result<T> where F: FnMut() -> Result<T> {
+    for i in 0.. {
+        let result = f();
+
+        if i == RETRY_TIMES || result.is_ok() {
+            return result;
+        }
+
+        thread::sleep(Duration::from_millis(
+            2_u64
+                .pow(i.try_into().unwrap())
+                .mul(BACKOFF_TIME_MS)));
+    }
+
+    unreachable!()
 }
