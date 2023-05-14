@@ -168,8 +168,14 @@ impl transaction::Service for MemoryStorage {
             }
 
             let data_ts = latest_write
-                .map(|((_, data_ts), _)| data_ts.clone())
-                .unwrap();
+                .map(|((_, _), value)| {
+                    if let Value::Timestamp(data_ts) = value {
+                        return data_ts;
+                    }
+                    unreachable!();
+                })
+                .unwrap()
+                .clone();
 
             let value = table
                 .read(
@@ -181,14 +187,13 @@ impl transaction::Service for MemoryStorage {
                 .map(|(_, value)| value)
                 .unwrap();
 
-            return match value {
-                Value::Vector(value) => {
-                    return Ok(GetResponse {
-                        value: value.clone(),
-                    })
-                }
-                Value::Timestamp(_) => return Err(Error::Stopped),
+            if let Value::Vector(data) = value {
+                return Ok(GetResponse {
+                    value: data.clone(),
+                });
             };
+
+            unreachable!()
         }
     }
 
@@ -280,17 +285,22 @@ impl MemoryStorage {
             };
 
         let Value::Vector(primary_key) = value else {
-            panic!("Stopped");
+            unreachable!();
         };
 
         let ts = ts.clone();
 
         table.erase(key.clone(), Column::Lock, ts.clone());
 
-        if let Some(((_, commit_ts), _)) =
+        if let Some(((_, _), value)) =
             table.read(key.clone(), Column::Write, Some(0), Some(ts))
         {
+
+            let Value::Timestamp(commit_ts) = value else {
+                unreachable!();
+            };
             let commit_ts = commit_ts.clone();
+
             table.write(
                 key.clone(),
                 Column::Write,

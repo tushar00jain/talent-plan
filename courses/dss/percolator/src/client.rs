@@ -80,28 +80,37 @@ impl Client {
         let (primary_key, _) = &self.writes[0];
 
         for (key, value) in &self.writes {
-            throttled_exponential_backoff(|| {
+            let result = throttled_exponential_backoff(|| {
                 executor::block_on(self.txn_client.prewrite(&PrewriteRequest {
                     key: key.clone(),
                     start_ts: self.start_ts,
                     value: value.clone(),
                     primary_key: key.clone(),
                 }))
-            })?;
+            });
+
+            if result.is_err() {
+                return Ok(false);
+            }
         }
 
         let commit_ts = self.get_timestamp()?;
 
         let mut is_primary = true;
         for (key, value) in &self.writes {
-            throttled_exponential_backoff(|| {
+            let result = throttled_exponential_backoff(|| {
                 executor::block_on(self.txn_client.commit(&CommitRequest {
                     is_primary,
                     key: key.clone(),
                     start_ts: self.start_ts,
                     commit_ts,
                 }))
-            })?;
+            });
+
+            if result.is_err() {
+                return Ok(false);
+            }
+
             is_primary = false;
         }
 
