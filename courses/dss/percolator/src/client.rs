@@ -1,7 +1,7 @@
 use futures::executor;
 use labrpc::*;
 
-use crate::{service::{TSOClient, TransactionClient}, msg::{TimestampRequest, GetRequest}};
+use crate::{service::{TSOClient, TransactionClient}, msg::{TimestampRequest, GetRequest, PrewriteRequest, CommitRequest}};
 
 // BACKOFF_TIME_MS is the wait time before retrying to send the request.
 // It should be exponential growth. e.g.
@@ -73,6 +73,34 @@ impl Client {
     /// Commits a transaction.
     pub fn commit(&self) -> Result<bool> {
         // Your code here.
-        unimplemented!()
+        let (primary_key, _) = &self.writes[0];
+
+        for (key, value) in &self.writes {
+            executor::block_on(
+                self.txn_client.prewrite(&PrewriteRequest {
+                    key: key.clone(),
+                    start_ts: self.start_ts,
+                    value: value.clone(),
+                    primary_key: key.clone(),
+                })
+            )?;
+        }
+
+        let commit_ts = self.get_timestamp()?;
+
+        let mut is_primary = true;
+        for (key, value) in &self.writes {
+            executor::block_on(
+                self.txn_client.commit(&CommitRequest {
+                    is_primary,
+                    key: key.clone(),
+                    start_ts: self.start_ts,
+                    commit_ts,
+                })
+            )?;
+            is_primary = false;
+        }
+
+        Ok(true)
     }
 }

@@ -39,6 +39,7 @@ message CommitRequest {
     bool is_primary = 1;
     uint64 start_ts = 2;
     bytes key = 3;
+    uint64 commit_ts = 4;
 }
 
 message CommitResponse {}

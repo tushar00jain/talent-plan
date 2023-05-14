@@ -198,7 +198,7 @@ impl transaction::Service for MemoryStorage {
             return Err(Error::Stopped)
         }
 
-        table.write(req.key.clone(), Column::Write, req.start_ts, Value::Timestamp(req.start_ts));
+        table.write(req.key.clone(), Column::Write, req.commit_ts, Value::Timestamp(req.start_ts));
         table.erase(req.key.clone(), Column::Lock, req.start_ts);
 
         Ok(CommitResponse {})
@@ -225,10 +225,10 @@ impl MemoryStorage {
 
         table.erase(key.clone(), Column::Lock, ts.clone());
 
-        if table
-            .read(key.clone(), Column::Write, Some(0), Some(ts))
-            .is_some() {
-            table.write(key.clone(), Column::Write, ts.clone(), Value::Timestamp(ts.clone()));
-        }
+        if let Some(((_, commit_ts), _)) =  table
+            .read(key.clone(), Column::Write, Some(0), Some(ts)) {
+                let commit_ts = commit_ts.clone();
+                table.write(key.clone(), Column::Write, commit_ts.clone(), Value::Timestamp(ts.clone()));
+            }
     }
 }
