@@ -85,7 +85,7 @@ impl Client {
                     key: key.clone(),
                     start_ts: self.start_ts,
                     value: value.clone(),
-                    primary_key: key.clone(),
+                    primary_key: primary_key.clone(),
                 }))
             });
 
