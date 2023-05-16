@@ -96,8 +96,9 @@ impl Client {
 
         let commit_ts = self.get_timestamp()?;
 
-        let mut is_primary = true;
         for (key, value) in &self.writes {
+            let is_primary = key == primary_key;
+
             let result = throttled_exponential_backoff(|| {
                 executor::block_on(self.txn_client.commit(&CommitRequest {
                     is_primary,
@@ -110,8 +111,6 @@ impl Client {
             if result.is_err() {
                 return Ok(!is_primary);
             }
-
-            is_primary = false;
         }
 
         Ok(true)

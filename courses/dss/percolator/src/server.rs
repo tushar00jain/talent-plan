@@ -289,11 +289,10 @@ impl MemoryStorage {
         };
 
         let ts = ts.clone();
-
-        table.erase(key.clone(), Column::Lock, ts.clone());
+        let primary_key = primary_key.clone();
 
         if let Some(((_, _), value)) =
-            table.read(key.clone(), Column::Write, Some(0), Some(ts))
+            table.read(primary_key.clone(), Column::Write, Some(ts), Some(u64::MAX))
         {
 
             let Value::Timestamp(commit_ts) = value else {
@@ -308,5 +307,7 @@ impl MemoryStorage {
                 Value::Timestamp(ts.clone()),
             );
         }
+
+        table.erase(key.clone(), Column::Lock, ts.clone());
     }
 }
