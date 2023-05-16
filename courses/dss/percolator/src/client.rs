@@ -108,7 +108,7 @@ impl Client {
             });
 
             if result.is_err() {
-                return Ok(false);
+                return Ok(!is_primary);
             }
 
             is_primary = false;
@@ -130,7 +130,7 @@ where
         }
 
         thread::sleep(Duration::from_millis(
-            2_u64.pow(i.try_into().unwrap()).mul(BACKOFF_TIME_MS),
+            BACKOFF_TIME_MS * 2u64.pow(i.try_into().unwrap()),
         ));
     }
 
