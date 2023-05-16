@@ -108,8 +108,17 @@ impl Client {
                 }))
             });
 
-            if result.is_err() {
-                return Ok(!is_primary);
+            if result.is_ok() || !is_primary {
+                continue;
+            }
+
+            let Err(err) = result else {
+                unreachable!()
+            };
+
+            match err {
+                Error::Other(msg) if msg == "reqhook" => return Ok(false),
+                _ => return Err(err),
             }
         }
 

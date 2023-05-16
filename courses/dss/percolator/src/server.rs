@@ -1,6 +1,7 @@
 use std::cmp::max;
 use std::collections::BTreeMap;
 use std::ops::Bound::Included;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use std::{thread, u64};
@@ -19,7 +20,7 @@ const TTL: u64 = Duration::from_millis(100).as_nanos() as u64;
 #[derive(Clone, Default)]
 pub struct TimestampOracle {
     // You definitions here if needed.
-    timestamp: Arc<Mutex<u64>>,
+    timestamp: Arc<AtomicU64>,
 }
 
 #[async_trait::async_trait]
@@ -35,12 +36,11 @@ impl timestamp::Service for TimestampOracle {
             .unwrap()
             .as_nanos() as u64;
 
-        let mut timestamp = self.timestamp.lock().unwrap();
-
-        *timestamp = max(now, *timestamp + 1);
+        self.timestamp.fetch_add(1, Ordering::Relaxed);
+        self.timestamp.fetch_max(now, Ordering::Relaxed);
 
         Ok(TimestampResponse {
-            timestamp: *timestamp,
+            timestamp: self.timestamp.load(Ordering::Relaxed),
         })
     }
 }
@@ -294,10 +294,10 @@ impl MemoryStorage {
         if let Some(((_, _), value)) =
             table.read(primary_key.clone(), Column::Write, Some(ts), Some(u64::MAX))
         {
-
             let Value::Timestamp(commit_ts) = value else {
                 unreachable!();
             };
+
             let commit_ts = commit_ts.clone();
 
             table.write(
